@@ -1,0 +1,108 @@
+---
+
+# ---------------------------------------------------------------------------
+# code-server release. Pinned deliberately: the version drives both the image
+# tag and the RPM asset URL in the Containerfile, so a bump forces a rebuild
+# rather than reusing a stale image. Never 'latest' — the RPM URL needs a real
+# version, and an unpinned IDE is a moving target for every developer at once.
+# https://github.com/coder/code-server/releases
+# ---------------------------------------------------------------------------
+code_server_version: '4.127.0'
+
+code_server_image: "localhost/code-server:{{ code_server_version }}"
+
+# ---------------------------------------------------------------------------
+# Build image. UBI 9 (not UBI 10, the project default) because the AAP and
+# RHOSO content this workspace ships is published only for RHEL 9:
+#   ansible-automation-platform-{{ ver }}-for-rhel-9-x86_64-rpms
+#   rhoso-tools-{{ ver }}-for-rhel-9-x86_64-rpms
+# See README "Building the image" — those repos must be reachable from the
+# build, which is the one thing most likely to fail on a RHEL 10 host.
+# ---------------------------------------------------------------------------
+code_server_base_image: registry.access.redhat.com/ubi9:latest
+
+code_server_aap_version: '2.7'
+
+code_server_oso_version: '18'
+
+code_server_mise_version: v2026.7.3
+
+# Port code-server listens on *inside* the container. Identical for every user —
+# isolation comes from separate containers, not separate internal ports.
+code_server_port: 8080
+
+# password | none. 'password' reads $PASSWORD, injected from a per-user Podman
+# secret. Keep it even behind SSO: it is the last gate if the proxy is bypassed.
+code_server_auth: password
+
+# ---------------------------------------------------------------------------
+# The single public hostname every developer uses. Keycloak decides who you are
+# and Caddy routes you to your own backend — there is no per-developer hostname
+# and only one DNS record. Must match the Caddy site block
+# (see files/caddy_code_server.conf) and the oauth2-proxy redirect URI.
+# ---------------------------------------------------------------------------
+code_server_domain: code.lab.example.org
+
+# ---------------------------------------------------------------------------
+# LAN address the per-user ports are published on. Caddy runs on a *different*
+# host and reverse-proxies across 10.0.10.0/24, so this must be the routable
+# address of THIS host — not 127.0.0.1.
+#
+# There is no safe default and no fact to fall back on (every playbook in this
+# collection runs gather_facts: false), so playbooks/code_server.yml asserts it.
+# ---------------------------------------------------------------------------
+code_server_bind_address: ''
+
+# Shared `podman build` context (Containerfile + bashrc + ca-certs/). Root-owned
+# and world-readable: every rootless user builds from it, but none may write it.
+code_server_build_dir: /var/lib/code-server/build
+
+# Host CA staged into the build context. Build-time dnf reaches Satellite over
+# HTTPS long before the runtime CA bind-mount exists, so this is NOT redundant.
+code_server_ca_trust_src: /etc/ipa/ca.crt
+
+# Published ports are on the LAN, so firewalld must scope them to the reverse
+# proxy. Tighten to the Caddy host's /32 once its address is fixed.
+code_server_manage_firewall: true
+
+code_server_caddy_source: 10.0.10.0/24
+
+code_server_manage_linger: true
+
+# Only needed when a developer's home is outside /home — rootless Podman's image
+# store then never gets container_file_t and nothing starts. See the netbird role.
+code_server_selinux_home_equivalent: false
+
+# ---------------------------------------------------------------------------
+# Tenants — one rootless container per developer, each running under that
+# developer's OWN OS/IdM account. A container escape therefore lands you as that
+# one developer, and UserNS=keep-id means files under /workspaces come out owned
+# by the real IdM user.
+#
+# Ports are explicit, never derived from a base + loop index: reordering this
+# list must never silently reassign a developer's port, because the port is also
+# baked into their firewalld rule and their Caddy site block.
+#
+# Each username must already exist as an OS/IdM account WITH subuid/subgid
+# ranges (asserted by the role — see README "Prerequisites").
+#
+# The username is also the ROUTING KEY: Caddy matches it against the Keycloak
+# `preferred_username` claim that oauth2-proxy returns, to decide which backend
+# a request reaches. It must therefore equal the developer's IdM uid exactly.
+#
+# code_server_users:
+#   - username: alice        # DNS-safe: ^[a-z0-9-]+$ AND the Keycloak preferred_username
+#     port: 8443             # unique per user; published on code_server_bind_address
+#     password: "{{ _vault_code_server_alice_password }}"
+#   - username: bob
+#     port: 8444
+#     password: "{{ _vault_code_server_bob_password }}"
+# ---------------------------------------------------------------------------
+code_server_users: []
+
+# ---------------------------------------------------------------------------
+# Secrets — supplied at run time via AAP credential injectors / vault, never
+# committed. Asserted by playbooks/code_server.yml. NOT defaulted here.
+#
+#   <each code_server_users[].password>   # openssl rand -base64 24
+# ---------------------------------------------------------------------------

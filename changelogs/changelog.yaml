@@ -1,0 +1,11 @@
+---
+ancestor: null
+releases:
+  1.0.0:
+    changes:
+      release_summary: >-
+        Initial release of the infra.apps collection for deploying self-hosted
+        application services (AI inference, AI web UI, Caddy reverse proxy,
+        Headscale control plane, Matrix homeserver, and monitoring) via
+        rootless Podman Quadlets on RHEL.
+    release_date: '2026-06-18'

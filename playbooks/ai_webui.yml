@@ -1,0 +1,12 @@
+---
+
+- name: Artificial Intelligence (AI) Web User Interface (UI)
+  hosts: "{{ target | default('ai_webui') }}"
+  gather_facts: false
+  become: true
+  tags:
+    - apps
+    - ai
+    - ai_webui
+  roles:
+    - role: ai_webui

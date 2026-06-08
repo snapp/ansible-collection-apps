@@ -1,0 +1,9 @@
+---
+minor_changes:
+  - ai_gws role - add a role and ``playbooks/ai_gws.yml`` that deploy
+    aaronsb/google-workspace-mcp as one isolated rootless Podman Quadlet per
+    Google account (mcpo bridging each stdio server), folded into the AI stack on
+    ``ai.network`` and wired into ``playbooks/site.yml``. Each account gets its
+    own container, volumes, and mcpo Bearer key so no Open WebUI user can reach
+    another user's Google data. Ships a UBI 10 build image and a per-account OAuth
+    bootstrap runbook.

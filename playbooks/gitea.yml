@@ -1,0 +1,11 @@
+---
+
+- name: Gitea Source Code Management (SCM)
+  hosts: "{{ target | default('gitea') }}"
+  gather_facts: false
+  become: true
+  tags:
+    - apps
+    - gitea
+  roles:
+    - role: gitea

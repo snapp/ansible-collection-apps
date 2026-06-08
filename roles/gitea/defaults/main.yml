@@ -1,0 +1,39 @@
+---
+
+# Service account that owns the rootless Podman user units. Must already exist
+# (IdM system user) with subuid/subgid ranges allocated; the role enables linger
+# so Gitea survives reboots. Mirrors the caddy/unifi service-account model.
+gitea_service_user: gitea
+
+gitea_service_group: gitea
+
+# Upstream Gitea image, pinned to a minor line. The `-rootless` variant runs the
+# server as an unprivileged `git` user inside the container (HTTP :3000,
+# SSH :2222), satisfying the non-root container standard. Bump deliberately —
+# schema migrations run automatically on the first start after an upgrade.
+gitea_version: '1.22'
+
+gitea_image: "docker.io/gitea/gitea:{{ gitea_version }}-rootless"
+
+# External hostname Gitea advertises in clone URLs, webhooks, and OAuth
+# callbacks. Must match the Caddy site block (see files/caddy_gitea.conf).
+gitea_domain: git.example.org
+
+gitea_root_url: "https://{{ gitea_domain }}/"
+
+# Host port Gitea's HTTP listener is published on. Bound to localhost only — Caddy
+# terminates TLS and reverse-proxies to it via host.containers.internal:3000.
+gitea_http_host_port: 3000
+
+# Host port for git-over-SSH (clone/push). Published on all interfaces and also
+# advertised in ssh:// clone URLs, so the two stay in sync. 22 is left to the
+# host sshd; 2222 avoids the conflict and needs no privileged-port workaround.
+gitea_ssh_host_port: 2222
+
+gitea_publish_ports:
+  - '127.0.0.1:{{ gitea_http_host_port }}:3000'   # HTTP — fronted by Caddy (localhost only)
+  - '{{ gitea_ssh_host_port }}:2222'              # SSH — git clone/push
+
+# Lab hardening: no open sign-ups. Create users through the admin UI or
+# `podman exec gitea gitea admin user create ...`.
+gitea_disable_registration: true

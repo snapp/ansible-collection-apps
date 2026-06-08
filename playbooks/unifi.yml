@@ -1,0 +1,11 @@
+---
+
+- name: UniFi Network Application — self-hosted network controller
+  hosts: "{{ target | default('unifi') }}"
+  gather_facts: false
+  become: true
+  tags:
+    - apps
+    - unifi
+  roles:
+    - role: unifi

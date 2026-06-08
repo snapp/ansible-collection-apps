@@ -1,0 +1,170 @@
+---
+# Per-developer resources. Included once per code_server_users entry (loop_var
+# __code_server_user). Task names are prefixed to satisfy ansible-lint name[prefix].
+#
+# Unlike every other role in this collection, podman_run_as_user varies per
+# iteration: each developer's container runs under their OWN rootless account.
+# Order matters — linger must exist before any `systemctl --user` call the
+# podman system role makes.
+
+- name: user | Look up the developer's OS account
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ __code_server_user.username }}"
+    fail_key: false
+  become: true
+
+- name: user | Assert the developer's OS account exists
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.getent_passwd[__code_server_user.username] is defined
+    quiet: true
+    fail_msg: >-
+      No OS account '{{ __code_server_user.username }}' on this host. Each
+      code_server_users entry must map to a real OS/IdM account that owns its
+      own rootless Podman containers.
+
+- name: user | Record the developer's home directory
+  ansible.builtin.set_fact:
+    code_server_user_home: "{{ ansible_facts.getent_passwd[__code_server_user.username][4] }}"
+
+# IdM accounts do NOT get subuid/subgid ranges automatically, and rootless Podman
+# cannot start a single container without them. Assert rather than mutate IdM.
+- name: user | Look up the developer's subuid range
+  ansible.builtin.command:
+    cmd: "getent subuid {{ __code_server_user.username }}"
+  register: code_server_subuid
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: user | Assert the developer has a subuid range
+  ansible.builtin.assert:
+    that:
+      - code_server_subuid.rc == 0
+      - code_server_subuid.stdout | length > 0
+    quiet: true
+    fail_msg: >-
+      No subuid range for '{{ __code_server_user.username }}'. Rootless Podman
+      needs subuid/subgid ranges. For IdM accounts run `ipa subid-add --owner={{
+      __code_server_user.username }}` and ensure `subid: sss` is set in
+      /etc/nsswitch.conf; for local accounts add entries to /etc/subuid and
+      /etc/subgid.
+
+- name: user | Enable lingering so the rootless code-server unit starts at boot
+  ansible.builtin.command:
+    cmd: "loginctl enable-linger {{ __code_server_user.username }}"
+    creates: "/var/lib/systemd/linger/{{ __code_server_user.username }}"
+  become: true
+  when: code_server_manage_linger | bool
+
+# ---------------------------------------------------------------------------
+# When a developer's home is outside /home, rootless Podman's image store never
+# receives container_file_t from container-selinux's stock file-context rules.
+# The confined container_t process is then denied read on its own image layers
+# and nothing starts. Register the home as /home-equivalent so the store labels
+# correctly, then relabel any images a prior (broken) run already built.
+# ---------------------------------------------------------------------------
+- name: user | Register rootless container storage as /home-equivalent (SELinux)
+  community.general.sefcontext:
+    target: "{{ code_server_user_home }}"
+    substitute: "/home/{{ __code_server_user.username }}"
+    state: present
+  become: true
+  when: code_server_selinux_home_equivalent | bool
+  tags: code_server_selinux
+
+- name: user | Check whether rootless container storage already exists
+  ansible.builtin.stat:
+    path: "{{ code_server_user_home }}/.local/share/containers"
+  become: true
+  register: code_server_container_storage
+  when: code_server_selinux_home_equivalent | bool
+  tags: code_server_selinux
+
+- name: user | Relabel pre-existing rootless container storage (SELinux)
+  ansible.builtin.command:
+    cmd: restorecon -R -v {{ code_server_user_home }}
+  become: true
+  register: code_server_restorecon
+  changed_when: code_server_restorecon.stdout | length > 0
+  when:
+    - code_server_selinux_home_equivalent | bool
+    - code_server_container_storage.stat.exists | default(false)
+  tags: code_server_selinux
+
+# Each rootless user has its own image store, so the image is built once per
+# developer from the shared, read-only build context. N builds, N copies — the
+# accepted cost of per-user isolation.
+- name: user | Build the code-server image for this developer
+  redhat.rhel_system_roles.podman_image:
+    name: "{{ code_server_image }}"
+    path: "{{ code_server_build_dir }}"
+    build:
+      format: oci
+      extra_args: >-
+        --build-arg CODE_SERVER_VERSION={{ code_server_version }}
+        --build-arg AAP_VERSION={{ code_server_aap_version }}
+        --build-arg OSO_VERSION={{ code_server_oso_version }}
+        --build-arg MISE_VERSION={{ code_server_mise_version }}
+    force: false
+  become: true
+  become_user: "{{ __code_server_user.username }}"
+  notify: Restart code_server instances
+  tags: code_server_build
+
+- name: user | Store the per-developer code-server password
+  ansible.builtin.include_role:
+    name: redhat.rhel_system_roles.podman
+  vars:
+    podman_run_as_user: "{{ __code_server_user.username }}"
+    podman_systemd_unit_scope: user
+    podman_secrets:
+      - name: "code-server-{{ __code_server_user.username }}-password"
+        state: present
+        data: "{{ __code_server_user.password }}"
+  no_log: true
+
+- name: user | Deploy the per-developer Quadlet units
+  ansible.builtin.include_role:
+    name: redhat.rhel_system_roles.podman
+  vars:
+    podman_run_as_user: "{{ __code_server_user.username }}"
+    podman_systemd_unit_scope: user
+    podman_activate_systemd_unit: true
+    podman_quadlet_specs:
+      - name: "code-server-{{ __code_server_user.username }}-config"
+        type: volume
+        state: started
+        file_content: |
+          [Volume]
+          VolumeName=code-server-{{ __code_server_user.username }}-config
+          Label=app=code-server
+
+      - name: "code-server-{{ __code_server_user.username }}-data"
+        type: volume
+        state: started
+        file_content: |
+          [Volume]
+          VolumeName=code-server-{{ __code_server_user.username }}-data
+          Label=app=code-server
+
+      - name: "code-server-{{ __code_server_user.username }}"
+        type: container
+        pull_image: false
+        state: started
+        file_content: "{{ lookup('template', role_path + '/templates/code_server.container.j2') }}"
+
+# The port is published on the LAN so a Caddy on another host can reach it.
+# Without this rule anything on the subnet could hit the login page directly.
+- name: user | Restrict this developer's port to the Caddy source (firewalld)
+  ansible.posix.firewalld:
+    rich_rule: >-
+      rule family=ipv4
+      source address={{ code_server_caddy_source }}
+      port port={{ __code_server_user.port }} protocol=tcp accept
+    state: enabled
+    permanent: true
+    immediate: true
+  become: true
+  when: code_server_manage_firewall | bool

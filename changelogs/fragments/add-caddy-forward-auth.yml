@@ -1,0 +1,19 @@
+---
+minor_changes:
+  - caddy role - add ``caddy_oauth2_proxies``, deploying one oauth2-proxy Quadlet
+    per protected vhost so Caddy's core ``forward_auth`` directive can put
+    Keycloak SSO in front of applications with no OIDC of their own. When the
+    list is non-empty the role also creates a ``caddy.network`` Quadlet and joins
+    Caddy to it, so the sidecars are reached by container name and publish no host
+    port. OIDC client id, client secret, and cookie secret are stored as Podman
+    secrets and injected as ``OAUTH2_PROXY_*`` environment variables. A Caddy
+    deployment with no ``caddy_oauth2_proxies`` entries is unchanged.
+
+bugfixes:
+  - netbird role - use ``community.general.sefcontext`` for the SELinux
+    ``/home``-equivalent task. ``redhat.rhel_system_roles.sefcontext`` does not
+    exist, so the task failed with ``couldn't resolve module/action`` whenever
+    ``netbird_selinux_home_equivalent`` was true (its default). Adds
+    ``community.general`` to the collection dependencies.
+  - code_server role - use ``community.general.sefcontext`` rather than the
+    non-existent ``redhat.rhel_system_roles.sefcontext``.

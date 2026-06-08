@@ -1,0 +1,147 @@
+---
+
+# ---------------------------------------------------------------------------
+# Service identity — runs as a dedicated rootless IdM user, exactly like the
+# caddy and ai_webui roles. The 'netbird' user must exist with linger enabled:
+#   ipa user-add netbird --shell=/sbin/nologin --home=/var/lib/netbird
+#   loginctl enable-linger netbird
+# ---------------------------------------------------------------------------
+netbird_service_user: netbird
+
+netbird_service_group: netbird
+
+netbird_dns_static_hosts: []
+
+# Home directory of the rootless service user. Rootless Podman keeps its image
+# store under here (~/.local/share/containers). Because this sits outside /home,
+# container-selinux's stock file-context rules never assign container_file_t to
+# the store, so it must be registered as /home-equivalent (see the SELinux task).
+netbird_home_dir: /var/lib/netbird
+
+# Register netbird_home_dir as SELinux-equivalent to /home/<user> so the rootless
+# container store is labeled container_file_t. Disable only if the service user's
+# home already lives under /home.
+netbird_selinux_home_equivalent: true
+
+# Host-side config directory (rendered management.json + turnserver.conf live here).
+# Lives under the service user's home — never committed to git.
+netbird_config_dir: "{{ netbird_home_dir }}/config"
+
+# ---------------------------------------------------------------------------
+# Application Plane namespace / TLS
+# Public FQDN fronted by the Caddy reverse proxy (Let's Encrypt DNS-01).
+# ---------------------------------------------------------------------------
+netbird_domain: vpn.example.org
+
+# default to co-located with netbird_domain
+netbird_relay_domain: "{{ netbird_domain }}"
+
+netbird_dashboard_url: "https://{{ netbird_domain }}"
+
+# Overlay (MagicDNS-style) domain handed to peers by the Management server.
+netbird_mgmt_dns_domain: vpn.selfhosted
+
+# ---------------------------------------------------------------------------
+# Container images
+# NOTE|2026-06-28| Pin to a released tag in group_vars before production; ':latest'
+# is convenient for the PoC but defeats reproducible, auditable deployments.
+# ---------------------------------------------------------------------------
+netbird_management_image: docker.io/netbirdio/management:latest
+netbird_signal_image: docker.io/netbirdio/signal:latest
+netbird_dashboard_image: docker.io/netbirdio/dashboard:latest
+netbird_coturn_image: docker.io/coturn/coturn:latest
+
+# ---------------------------------------------------------------------------
+# Localhost-published ports.
+# Caddy (a separate rootless container) reaches these via host.containers.internal.
+# Everything stays bound to 127.0.0.1 — only Caddy is ever network-exposed (443).
+# ---------------------------------------------------------------------------
+netbird_dashboard_publish_ports:
+  - '127.0.0.1:8090:80'
+
+netbird_management_publish_ports:
+  - '127.0.0.1:8091:80'
+
+netbird_signal_publish_ports:
+  - '127.0.0.1:8092:80'
+
+# ---------------------------------------------------------------------------
+# Keycloak / RHBK OIDC federation (Identity Plane: sso.example.org)
+# ---------------------------------------------------------------------------
+netbird_oidc_base_url: https://sso.example.org
+
+netbird_oidc_realm: netbird
+
+netbird_oidc_issuer: "{{ netbird_oidc_base_url }}/realms/{{ netbird_oidc_realm }}"
+
+netbird_oidc_config_endpoint: "{{ netbird_oidc_issuer }}/.well-known/openid-configuration"
+
+netbird_oidc_token_endpoint: "{{ netbird_oidc_issuer }}/protocol/openid-connect/token"
+
+netbird_oidc_auth_endpoint: "{{ netbird_oidc_issuer }}/protocol/openid-connect/auth"
+
+netbird_oidc_device_auth_endpoint: "{{ netbird_oidc_issuer }}/protocol/openid-connect/auth/device"
+
+netbird_oidc_jwks_uri: "{{ netbird_oidc_issuer }}/protocol/openid-connect/certs"
+
+# Keycloak admin REST base — used by the IdP manager to sync users/groups.
+netbird_oidc_admin_endpoint: "{{ netbird_oidc_base_url }}/admin/realms/{{ netbird_oidc_realm }}"
+
+# Public SPA + device-flow client (PKCE, no secret).
+netbird_oidc_client_id: netbird
+
+netbird_oidc_audience: netbird
+
+# Confidential client used by Management's IdP manager (client_credentials grant)
+# to read users/groups from Keycloak. Its secret is a deployment secret (below).
+netbird_oidc_backend_client_id: netbird-backend
+
+# Scopes requested by the dashboard / PKCE flow. 'offline_access' is the conventional NetBird scopes
+# ensure matching client scopes exist in RHBK
+netbird_oidc_scopes: "openid profile email offline_access"
+
+# Device-authorization grant typically only needs openid.
+netbird_oidc_device_scopes: "openid"
+
+# Redirect targets accepted by the native NetBird client's OAuth PKCE login (RFC 8252, "OAuth for Native Apps") during PKCE login
+netbird_oidc_pkce_redirect_urls:
+  - "http://localhost:53000"
+
+# ---------------------------------------------------------------------------
+# Coturn / TURN relay (peer-to-peer fallback)
+# ---------------------------------------------------------------------------
+netbird_turn_user: netbird
+
+netbird_stun_port: 3478
+
+netbird_turn_tls_port: 5349
+
+netbird_turn_min_port: 49152
+
+netbird_turn_max_port: 65535
+
+# Set to the host's public/1:1-NAT address if Coturn sits behind NAT.
+# Leave empty to let Coturn auto-detect bound interfaces.
+netbird_turn_external_ip: ''
+
+# Bind Coturn's STUN/TURN listeners and relay allocations to a single host IP.
+# Leave empty to listen on all interfaces (Coturn default). Set this on a
+# multi-homed host to keep relay traffic on one VLAN interface.
+netbird_turn_listening_ip: ''
+
+# Open the STUN/TURN + relay UDP range in firewalld. Disable if a perimeter
+# firewall already governs these ports.
+netbird_manage_firewall: true
+
+# ---------------------------------------------------------------------------
+# Secrets — MUST be supplied at run time via AAP credential injectors as
+# extra_vars (never inline, never committed). The role asserts their presence.
+#
+#   netbird_relay_secret                 # shared TURN/relay secret (Management <-> peers)
+#   netbird_turn_password                # Coturn long-term-credential password
+#   netbird_datastore_encryption_key     # base64 32-byte key for the Management store
+#   netbird_oidc_backend_client_secret   # Keycloak 'netbird-backend' client secret
+#
+# Generate the encryption key once and store it in AAP:
+#   openssl rand -base64 32
+# ---------------------------------------------------------------------------

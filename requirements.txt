@@ -1,0 +1,4 @@
+ansible-lint
+antsibull-changelog
+antsibull-docs
+pre-commit

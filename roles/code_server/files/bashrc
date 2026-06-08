@@ -1,0 +1,23 @@
+# Shell profile for the in-container `ansible` runtime user.
+# Baked into the image via `COPY bashrc` — it is NOT a persisted volume, so any
+# edits a developer makes here are lost on container recreate. Durable work and
+# durable dotfiles belong under /workspaces.
+
+# Source the system-wide defaults first (aliases, bash-completion).
+if [ -f /etc/bashrc ]; then
+    . /etc/bashrc
+fi
+
+# mise lives in /usr/local/bin; user-installed tools land in ~/.local/bin.
+export PATH="${HOME}/.local/bin:/usr/local/bin:${PATH}"
+
+# The Containerfile sources this file non-interactively during the build, so
+# guard anything that assumes a TTY. `mise activate` emits shell hooks that are
+# meaningless (and noisy) without one.
+case "$-" in
+    *i*)
+        if command -v mise >/dev/null 2>&1; then
+            eval "$(mise activate bash)"
+        fi
+        ;;
+esac

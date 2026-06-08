@@ -1,0 +1,9 @@
+---
+
+- name: Restart unifi
+  ansible.builtin.systemd:
+    name: ubiquiti-unifi.service
+    state: restarted
+    scope: user
+  become: true
+  become_user: "{{ unifi_service_user }}"

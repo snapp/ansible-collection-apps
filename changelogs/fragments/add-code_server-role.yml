@@ -1,0 +1,18 @@
+---
+minor_changes:
+  - code_server role - add a role and ``playbooks/code_server.yml`` that deploy
+    code-server (VS Code in the browser) as one rootless Podman Quadlet per
+    developer, wired into ``playbooks/site.yml``. Each developer's container
+    runs under their own OS/IdM account with a distinct host port, per-user
+    volumes for code-server preferences and ``/workspaces``, and a per-user
+    ``$PASSWORD`` Podman secret, so a container escape is confined to that one
+    account. Ports are published on the LAN for a cross-host Caddy TLS reverse
+    proxy and restricted by firewalld to the proxy's source address. Ships a
+    UBI 9 SOE workspace build image (AAP and RHOSO tooling).
+  - code_server role - serve every developer from a single vhost
+    (``code_server_domain``) behind Keycloak SSO instead of one hostname each.
+    oauth2-proxy authenticates against Keycloak and gates on the
+    ``code-server-users`` group; Caddy then routes each request to that
+    developer's own backend by matching the ``preferred_username`` claim, and
+    answers 403 for an authenticated user with no workspace. Ships the reference
+    Caddy site block; requires a ``caddy_oauth2_proxies`` entry on the Caddy host.

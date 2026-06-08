@@ -1,0 +1,22 @@
+---
+
+- name: NetBird WireGuard Mesh Virtual Private Network (VPN) Control Plane
+  hosts: "{{ target | default('netbird') }}"
+  gather_facts: false
+  become: true
+  tags:
+    - apps
+    - netbird
+  pre_tasks:
+    - name: Assert required NetBird secrets are provided
+      ansible.builtin.assert:
+        that:
+          - netbird_relay_secret is defined and netbird_relay_secret | length > 0
+          - netbird_turn_password is defined and netbird_turn_password | length > 0
+          - netbird_datastore_encryption_key is defined and netbird_datastore_encryption_key | length > 0
+          - netbird_oidc_backend_client_secret is defined and netbird_oidc_backend_client_secret | length > 0
+        fail_msg: >-
+          netbird_relay_secret, netbird_turn_password, netbird_datastore_encryption_key,
+          and netbird_oidc_backend_client_secret are required
+  roles:
+    - role: netbird

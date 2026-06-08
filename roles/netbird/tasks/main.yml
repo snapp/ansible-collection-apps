@@ -1,0 +1,408 @@
+---
+
+- name: Assert all required NetBird secrets are provided
+  ansible.builtin.assert:
+    that:
+      - netbird_relay_secret is defined and netbird_relay_secret | length > 0
+      - netbird_turn_password is defined and netbird_turn_password | length > 0
+      - netbird_datastore_encryption_key is defined and netbird_datastore_encryption_key | length > 0
+      - netbird_oidc_backend_client_secret is defined and netbird_oidc_backend_client_secret | length > 0
+    fail_msg: >-
+      One or more required secrets are missing. Provide them via AAP credential
+      injectors or -e extra_vars: netbird_relay_secret, netbird_turn_password,
+      netbird_datastore_encryption_key, netbird_oidc_backend_client_secret.
+    quiet: true
+
+- name: Allow containers to read host CA certificates (SELinux)
+  ansible.posix.seboolean:
+    name: container_read_certs
+    state: true
+    persistent: true
+  become: true
+
+# ---------------------------------------------------------------------------
+# The service user's home is outside /home (netbird_home_dir), so rootless
+# Podman's image store never receives container_file_t from container-selinux's
+# stock file-context rules. The confined container_t process is then denied read
+# on its own image layers (libc, python, netbird-management) and nothing starts.
+# Register the home as /home-equivalent so the store labels correctly, then
+# relabel any images a prior (broken) run already pulled.
+# ---------------------------------------------------------------------------
+- name: Register rootless container storage as /home-equivalent (SELinux)
+  community.general.sefcontext:
+    target: "{{ netbird_home_dir }}"
+    substitute: "/home/{{ netbird_service_user }}"
+    state: present
+  become: true
+  when: netbird_selinux_home_equivalent | bool
+  tags: netbird_selinux
+
+- name: Check whether rootless container storage already exists
+  ansible.builtin.stat:
+    path: "{{ netbird_home_dir }}/.local/share/containers"
+  become: true
+  register: netbird_container_storage
+  when: netbird_selinux_home_equivalent | bool
+  tags: netbird_selinux
+
+- name: Relabel pre-existing rootless container storage (SELinux)
+  ansible.builtin.command:
+    cmd: restorecon -R -v {{ netbird_home_dir }}
+  become: true
+  register: netbird_restorecon
+  changed_when: netbird_restorecon.stdout | length > 0
+  when:
+    - netbird_selinux_home_equivalent | bool
+    - netbird_container_storage.stat.exists | default(false)
+  tags: netbird_selinux
+
+- name: Ensure NetBird config directory exists
+  ansible.builtin.file:
+    path: "{{ netbird_config_dir }}"
+    state: directory
+    owner: "{{ netbird_service_user }}"
+    group: "{{ netbird_service_group }}"
+    mode: '0750'
+  become: true
+  tags: netbird_configure
+
+- name: Deploy Management configuration (management.json)
+  ansible.builtin.copy:
+    dest: "{{ netbird_config_dir }}/management.json"
+    owner: "{{ netbird_service_user }}"
+    group: "{{ netbird_service_group }}"
+    mode: '0600'
+    setype: container_file_t
+    content: |
+      {
+          "Stuns": [
+              {
+                  "Proto": "udp",
+                  "URI": "stun:{{ netbird_relay_domain }}:{{ netbird_stun_port }}",
+                  "Username": "",
+                  "Password": ""
+              }
+          ],
+          "TURNConfig": {
+              "TimeBasedCredentials": false,
+              "CredentialsTTL": "12h",
+              "Secret": "{{ netbird_relay_secret }}",
+              "Turns": [
+                  {
+                      "Proto": "udp",
+                      "URI": "turn:{{ netbird_relay_domain }}:{{ netbird_stun_port }}",
+                      "Username": "{{ netbird_turn_user }}",
+                      "Password": "{{ netbird_turn_password }}"
+                  }
+              ]
+          },
+          "Signal": {
+              "Proto": "https",
+              "URI": "{{ netbird_domain }}:443",
+              "Username": "",
+              "Password": ""
+          },
+          "Datadir": "/var/lib/netbird",
+          "DataStoreEncryptionKey": "{{ netbird_datastore_encryption_key }}",
+          "StoreConfig": {
+              "Engine": "sqlite"
+          },
+          "HttpConfig": {
+              "Address": "0.0.0.0:80",
+              "AuthIssuer": "{{ netbird_oidc_issuer }}",
+              "AuthAudience": "{{ netbird_oidc_audience }}",
+              "AuthKeysLocation": "{{ netbird_oidc_jwks_uri }}",
+              "OIDCConfigEndpoint": "{{ netbird_oidc_config_endpoint }}",
+              "IdpSignKeyRefreshEnabled": true
+          },
+          "IdpManagerConfig": {
+              "ManagerType": "keycloak",
+              "ClientConfig": {
+                  "Issuer": "{{ netbird_oidc_issuer }}",
+                  "TokenEndpoint": "{{ netbird_oidc_token_endpoint }}",
+                  "ClientID": "{{ netbird_oidc_backend_client_id }}",
+                  "ClientSecret": "{{ netbird_oidc_backend_client_secret }}",
+                  "GrantType": "client_credentials"
+              },
+              "ExtraConfig": {
+                  "AdminEndpoint": "{{ netbird_oidc_admin_endpoint }}"
+              }
+          },
+          "DeviceAuthorizationFlow": {
+              "Provider": "hosted",
+              "ProviderConfig": {
+                  "Audience": "{{ netbird_oidc_audience }}",
+                  "ClientID": "{{ netbird_oidc_client_id }}",
+                  "Scope": "{{ netbird_oidc_device_scopes }}",
+                  "TokenEndpoint": "{{ netbird_oidc_token_endpoint }}",
+                  "DeviceAuthEndpoint": "{{ netbird_oidc_device_auth_endpoint }}"
+              }
+          },
+          "PKCEAuthorizationFlow": {
+              "ProviderConfig": {
+                  "Audience": "{{ netbird_oidc_audience }}",
+                  "ClientID": "{{ netbird_oidc_client_id }}",
+                  "Scope": "{{ netbird_oidc_scopes }}",
+                  "TokenEndpoint": "{{ netbird_oidc_token_endpoint }}",
+                  "AuthorizationEndpoint": "{{ netbird_oidc_auth_endpoint }}",
+                  "RedirectURLs": {{ netbird_oidc_pkce_redirect_urls | to_json }},
+                  "UseIDToken": false
+              }
+          }
+      }
+  become: true
+  no_log: "{{ soe_no_log_enabled | default(true) }}"
+  notify: Restart netbird-management
+  tags: netbird_configure
+
+- name: Deploy Coturn configuration (turnserver.conf)
+  ansible.builtin.copy:
+    dest: "{{ netbird_config_dir }}/turnserver.conf"
+    owner: "{{ netbird_service_user }}"
+    group: "{{ netbird_service_group }}"
+    mode: '0644'
+    setype: container_file_t
+    content: |
+      listening-port={{ netbird_stun_port }}
+      tls-listening-port={{ netbird_turn_tls_port }}
+      min-port={{ netbird_turn_min_port }}
+      max-port={{ netbird_turn_max_port }}
+      {% if netbird_turn_listening_ip | length > 0 %}
+      listening-ip={{ netbird_turn_listening_ip }}
+      relay-ip={{ netbird_turn_listening_ip }}
+      {% endif %}
+      {% if netbird_turn_external_ip | length > 0 %}
+      external-ip={{ netbird_turn_external_ip }}
+      {% endif %}
+      fingerprint
+      lt-cred-mech
+      user={{ netbird_turn_user }}:{{ netbird_turn_password }}
+      realm={{ netbird_domain }}
+      # TLS is terminated at Caddy for the web plane; the relay itself runs plain
+      # STUN/TURN. Enable TLS here later by mounting certs + dropping no-tls/no-dtls.
+      no-tls
+      no-dtls
+      no-software-attribute
+      pidfile=/var/tmp/turnserver.pid
+      log-file=stdout
+  become: true
+  no_log: "{{ soe_no_log_enabled | default(true) }}"
+  notify: Restart netbird-coturn
+  tags: netbird_configure
+
+- name: Open STUN/TURN relay ports (firewalld)
+  ansible.posix.firewalld:
+    port: "{{ item }}"
+    state: enabled
+    permanent: true
+    immediate: true
+  become: true
+  loop:
+    - "{{ netbird_stun_port }}/udp"
+    - "{{ netbird_stun_port }}/tcp"
+    - "{{ netbird_turn_tls_port }}/udp"
+    - "{{ netbird_turn_tls_port }}/tcp"
+    - "{{ netbird_turn_min_port }}-{{ netbird_turn_max_port }}/udp"
+  when: netbird_manage_firewall | bool
+  tags: netbird_firewall
+
+# redhat.rhel_system_roles.podman writes each spec to
+# ~netbird/.config/containers/systemd/, runs `systemctl --user daemon-reload`,
+# and starts the units (podman_activate_systemd_unit). Running as the rootless
+# 'netbird' user keeps the whole stack off the root account.
+- name: Deploy NetBird Quadlet units
+  ansible.builtin.include_role:
+    name: redhat.rhel_system_roles.podman
+  vars:
+    podman_run_as_user: "{{ netbird_service_user }}"
+    podman_systemd_unit_scope: user
+    podman_activate_systemd_unit: true
+    podman_quadlet_specs:
+      # --- Isolated bridge network shared by the web-plane containers ---------
+      - name: netbird
+        type: network
+        state: started
+        file_content: |
+          [Network]
+          NetworkName=netbird
+          Label=app=netbird
+
+      # --- Persistent Management state (SQLite store, keys) -------------------
+      - name: netbird-management
+        type: volume
+        state: started
+        file_content: |
+          [Volume]
+          VolumeName=netbird-management
+          Label=app=netbird
+
+      # --- Management API / control plane (Keycloak OIDC) --------------------
+      - name: netbird-management
+        type: container
+        pull_image: "{{ podman_pull_image | bool | default(false) }}"
+        continue_if_pull_fails: true
+        state: started
+        file_content: |
+          [Unit]
+          Description=NetBird Management — control plane and HTTP/gRPC API
+          After=local-fs.target network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Restart=on-failure
+          RestartSec=10
+          TimeoutStartSec=120
+
+          [Container]
+          ContainerName=netbird-management
+          Image={{ netbird_management_image }}
+          Network=netbird.network
+
+          {% for host in netbird_dns_static_hosts %}
+          AddHost={{ host }}
+          {% endfor %}
+
+          # Plain HTTP on :80 — Caddy terminates TLS and forwards REST + gRPC (h2c).
+          Exec=--port 80 --log-file console --log-level info --disable-anonymous-metrics=false --single-account-mode-domain={{ netbird_domain }} --dns-domain={{ netbird_mgmt_dns_domain }} --idp-sign-key-refresh-enabled
+
+          # Control-plane config (contains OIDC + TURN secrets), mounted read-only.
+          Volume={{ netbird_config_dir }}/management.json:/etc/netbird/management.json:ro
+
+          # Persist the SQLite store and generated keys.
+          Volume=netbird-management.volume:/var/lib/netbird:z
+
+          {% for port in netbird_management_publish_ports %}
+          PublishPort={{ port }}
+          {% endfor %}
+
+          # Mount host consolidated trust bundle for IdM-signed certs
+          Volume=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem:/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem:ro
+
+          # Ensure TLS stack can find the CA bundle
+          Environment=SSL_CERT_FILE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+          Environment=REQUESTS_CA_BUNDLE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+
+          [Install]
+          WantedBy=default.target
+
+      # --- Dashboard / Web UI ------------------------------------------------
+      - name: netbird-dashboard
+        type: container
+        pull_image: "{{ podman_pull_image | bool | default(false) }}"
+        continue_if_pull_fails: true
+        state: started
+        file_content: |
+          [Unit]
+          Description=NetBird Dashboard — web management UI
+          After=local-fs.target network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Restart=on-failure
+          RestartSec=10
+          TimeoutStartSec=60
+
+          [Container]
+          ContainerName=netbird-dashboard
+          Image={{ netbird_dashboard_image }}
+          Network=netbird.network
+
+          # Serve plain HTTP on :80; Caddy fronts it with TLS.
+          Environment=NETBIRD_DISABLE_LETSENCRYPT=true
+
+          # Public endpoints (single-domain deployment).
+          Environment=NETBIRD_MGMT_API_ENDPOINT=https://{{ netbird_domain }}
+          Environment=NETBIRD_MGMT_GRPC_API_ENDPOINT=https://{{ netbird_domain }}
+
+          # Keycloak OIDC (public client / PKCE).
+          Environment=USE_AUTH0=false
+          Environment=AUTH_AUTHORITY={{ netbird_oidc_issuer }}
+          Environment=AUTH_AUDIENCE={{ netbird_oidc_audience }}
+          Environment=AUTH_CLIENT_ID={{ netbird_oidc_client_id }}
+          Environment=AUTH_SUPPORTED_SCOPES={{ netbird_oidc_scopes }}
+          Environment=AUTH_REDIRECT_URI=/peers
+          Environment=AUTH_SILENT_REDIRECT_URI=/add-peers
+          Environment=NETBIRD_TOKEN_SOURCE=accessToken
+
+          {% for port in netbird_dashboard_publish_ports %}
+          PublishPort={{ port }}
+          {% endfor %}
+
+          # Mount host consolidated trust bundle for IdM-signed certs
+          Volume=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem:/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem:ro
+
+          # Ensure TLS stack can find the CA bundle
+          Environment=SSL_CERT_FILE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+          Environment=REQUESTS_CA_BUNDLE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+
+          [Install]
+          WantedBy=default.target
+
+      # --- Signal server (WireGuard handshake brokering) ---------------------
+      - name: netbird-signal
+        type: container
+        pull_image: "{{ podman_pull_image | bool | default(false) }}"
+        continue_if_pull_fails: true
+        state: started
+        file_content: |
+          [Unit]
+          Description=NetBird Signal — peer handshake exchange
+          After=local-fs.target network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Restart=on-failure
+          RestartSec=10
+          TimeoutStartSec=60
+
+          [Container]
+          ContainerName=netbird-signal
+          Image={{ netbird_signal_image }}
+          Network=netbird.network
+
+          Exec=--port 80 --log-file console --log-level info
+
+          {% for port in netbird_signal_publish_ports %}
+          PublishPort={{ port }}
+          {% endfor %}
+
+          # Mount host consolidated trust bundle for IdM-signed certs
+          Volume=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem:/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem:ro
+
+          # Ensure TLS stack can find the CA bundle
+          Environment=SSL_CERT_FILE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+          Environment=REQUESTS_CA_BUNDLE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+
+          [Install]
+          WantedBy=default.target
+
+      # --- Coturn relay (P2P fallback) ---------------------------------------
+      # Host networking: TURN must hand out the host's real address and bind the
+      # full relay UDP range; rootless host net is fine for ports >= 1024.
+      - name: netbird-coturn
+        type: container
+        pull_image: "{{ podman_pull_image | bool | default(false) }}"
+        continue_if_pull_fails: true
+        state: started
+        file_content: |
+          [Unit]
+          Description=NetBird Coturn — STUN/TURN relay
+          After=local-fs.target network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Restart=on-failure
+          RestartSec=10
+          TimeoutStartSec=60
+
+          [Container]
+          ContainerName=netbird-coturn
+          Image={{ netbird_coturn_image }}
+          Network=host
+
+          Exec=-c /etc/turnserver.conf
+
+          Volume={{ netbird_config_dir }}/turnserver.conf:/etc/turnserver.conf:ro
+
+          [Install]
+          WantedBy=default.target

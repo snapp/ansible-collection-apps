@@ -1,0 +1,53 @@
+---
+
+caddy_service_user: caddy
+
+caddy_service_group: caddy
+
+caddy_config_dir: /var/lib/caddy/config
+
+caddy_acme_ca: https://acme-v02.api.letsencrypt.org/directory
+
+caddy_publish_ports:
+  - '80:80'
+  - '443:443'
+
+# ---------------------------------------------------------------------------
+# Shared Podman network joined by Caddy and any oauth2-proxy sidecars, so Caddy
+# can reach them by container name. This is the whole reason the auth proxies
+# need no published host port — nothing off-host can talk to them.
+# ---------------------------------------------------------------------------
+caddy_network: caddy
+
+# Pinned upstream oauth2-proxy. The default (non `-alpine`) tag is distroless:
+# it ships only /bin/oauth2-proxy and runs as uid 65532, which satisfies the
+# non-root container standard but means no in-container healthcheck is possible.
+caddy_oauth2_proxy_image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.3
+
+# ---------------------------------------------------------------------------
+# Forward-auth sidecars — one oauth2-proxy per protected vhost.
+#
+# Caddy has no OIDC of its own (the stock image carries no auth plugin), but
+# `forward_auth` is a core directive. Each entry here becomes a container that
+# acts as the Keycloak OIDC client for one vhost; Caddy asks it "who is this?"
+# on every request and routes on the answer. See the `code_server` role's
+# files/caddy_code_server.conf for the matching site block.
+#
+# `allowed_groups` is matched against the `groups` claim. The realm's group
+# mappers set `full.path: false`, so use BARE names — no leading slash, despite
+# what the oauth2-proxy documentation shows.
+#
+# Secrets are supplied at run time via AAP credential injectors / vault and are
+# asserted by playbooks/caddy.yml. NOT defaulted here.
+#
+# caddy_oauth2_proxies:
+#   - name: code                          # -> container + DNS name oauth2-proxy-code
+#     domain: code.lab.example.org        # the vhost it protects; drives the redirect URI
+#     port: 4180                          # container-internal only; never published
+#     allowed_groups:
+#       - code-server-users
+#     client_id: "{{ _vault_code_server_oauth_client_id }}"
+#     client_secret: "{{ _vault_code_server_oauth_client_secret }}"
+#     cookie_secret: "{{ _vault_code_server_cookie_secret }}"   # openssl rand -base64 32 | tr -- '+/' '-_'
+# ---------------------------------------------------------------------------
+caddy_oauth2_proxies: []

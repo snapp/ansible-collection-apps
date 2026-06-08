@@ -1,0 +1,65 @@
+---
+# Per-account resources. Included once per ai_gws_users entry (loop_var
+# __ai_gws_user). Task names are prefixed to satisfy ansible-lint name[prefix].
+
+- name: account | Store the per-user mcpo API key
+  ansible.builtin.include_role:
+    name: redhat.rhel_system_roles.podman
+  vars:
+    podman_run_as_user: "{{ ai_gws_service_user }}"
+    podman_systemd_unit_scope: user
+    podman_secrets:
+      - name: "ai-gws-{{ __ai_gws_user.username }}-api-key"
+        state: present
+        data: "{{ __ai_gws_user.api_key }}"
+  no_log: true
+
+- name: account | Ensure the per-user config directory exists
+  ansible.builtin.file:
+    path: "{{ ai_gws_config_dir }}/{{ __ai_gws_user.username }}"
+    state: directory
+    owner: "{{ ai_gws_service_user }}"
+    group: "{{ ai_gws_service_group }}"
+    mode: '0755'
+  become: true
+
+- name: account | Render the per-user mcpo config
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: "{{ ai_gws_config_dir }}/{{ __ai_gws_user.username }}/config.json"
+    owner: "{{ ai_gws_service_user }}"
+    group: "{{ ai_gws_service_group }}"
+    mode: '0644'
+    setype: container_file_t
+  become: true
+  notify: Restart ai_gws instances
+
+- name: account | Deploy the per-user Quadlet units
+  ansible.builtin.include_role:
+    name: redhat.rhel_system_roles.podman
+  vars:
+    podman_run_as_user: "{{ ai_gws_service_user }}"
+    podman_systemd_unit_scope: user
+    podman_activate_systemd_unit: true
+    podman_quadlet_specs:
+      - name: "ai-gws-{{ __ai_gws_user.username }}-config"
+        type: volume
+        state: started
+        file_content: |
+          [Volume]
+          VolumeName=ai-gws-{{ __ai_gws_user.username }}-config
+          Label=app=ai-stack
+
+      - name: "ai-gws-{{ __ai_gws_user.username }}-data"
+        type: volume
+        state: started
+        file_content: |
+          [Volume]
+          VolumeName=ai-gws-{{ __ai_gws_user.username }}-data
+          Label=app=ai-stack
+
+      - name: "ai-gws-{{ __ai_gws_user.username }}"
+        type: container
+        pull_image: false
+        state: started
+        file_content: "{{ lookup('template', role_path + '/templates/ai-gws.container.j2') }}"

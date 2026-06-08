@@ -1,0 +1,22 @@
+---
+
+- name: Caddy Transport Layer Security (TLS) Reverse Proxy
+  ansible.builtin.import_playbook: caddy.yml
+
+- name: NetBird WireGuard Mesh Virtual Private Network (VPN)
+  ansible.builtin.import_playbook: netbird.yml
+
+- name: Gitea Source Code Management (SCM)
+  ansible.builtin.import_playbook: gitea.yml
+
+- name: Artificial Intelligence (AI) Inference
+  ansible.builtin.import_playbook: ai_inference.yml
+
+- name: Artificial Intelligence (AI) Web User Interface (UI)
+  ansible.builtin.import_playbook: ai_webui.yml
+
+- name: Google Workspace MCP Tool Servers (per user)
+  ansible.builtin.import_playbook: ai_gws.yml
+
+- name: Code Server Web Integrated Development Environment (IDE)
+  ansible.builtin.import_playbook: code_server.yml

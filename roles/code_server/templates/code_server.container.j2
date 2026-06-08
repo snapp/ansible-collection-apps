@@ -1,0 +1,66 @@
+{{ ansible_managed | comment }}
+{% set user = __code_server_user %}
+[Unit]
+Description=Code Server Web IDE - {{ user.username }}
+After=local-fs.target network-online.target
+Wants=network-online.target
+
+[Service]
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=120
+
+[Container]
+ContainerName=code-server-{{ user.username }}
+Image={{ code_server_image }}
+Label=app=code-server
+Label=code-user={{ user.username }}
+
+# Published on the LAN, not loopback: Caddy terminates TLS on another host and
+# proxies here. firewalld restricts the source to {{ code_server_caddy_source }}.
+PublishPort={{ code_server_bind_address }}:{{ user.port }}:{{ code_server_port }}
+
+# --bind-addr is not optional and not redundant with config.yaml.
+# It keeps args count > 1, which keeps code-server off the
+# shouldOpenInExistingInstance() branch. No positional path: let
+# last-opened restore, and hand users ?folder= / ?workspace= URLs.
+Exec=code-server \
+  --bind-addr 0.0.0.0:{{ code_server_port }} \
+  --auth {{ code_server_auth }} \
+  --trusted-origins {{ code_server_domain }} \
+  --disable-telemetry \
+  --disable-update-check
+
+# Host UID -> container uid 1000 (the `ansible` user in the image), so
+# bind-mounted files come out owned by the real IdM user.
+UserNS=keep-id:uid=1000,gid=1000
+
+# Per-user code-server password — distinct per container. code-server reads
+# $PASSWORD when --auth password is set.
+Secret=code-server-{{ user.username }}-password,type=env,target=PASSWORD
+
+# Per-user volume to persist code-server preferences: the user-data-dir holds
+# settings.json, keybindings, machine state, and installed extensions.
+Volume=code-server-{{ user.username }}-config.volume:/home/ansible/.local/share/code-server:Z
+
+# Per-user volume to persist /workspaces — the only durable place for real work.
+Volume=code-server-{{ user.username }}-data.volume:/workspaces:Z
+
+# Mount host consolidated trust bundle for IdM-signed certs
+Volume=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem:/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem:ro
+
+# Ensure the Python, Node, TLS stacks find the CA bundle
+Environment=SSL_CERT_FILE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+Environment=REQUESTS_CA_BUNDLE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+Environment=NODE_EXTRA_CA_CERTS=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+
+# /healthz is served unauthenticated, so the probe needs no password — it checks
+# liveness only. Probe the container port, never the published host port.
+HealthCmd=curl -fsS --output /dev/null http://127.0.0.1:{{ code_server_port }}/healthz || exit 1
+HealthInterval=30s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=20s
+
+[Install]
+WantedBy=default.target

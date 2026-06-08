@@ -1,0 +1,142 @@
+# {{ ansible_managed }}
+# Red Hat Universal Base Image (UBI)
+# trivy:ignore:DS-0001 - ubi9:latest is intentional
+FROM {{ code_server_base_image }} AS soe-workspace
+
+# Allow Override of code-server Version
+ARG CODE_SERVER_VERSION={{ code_server_version }}
+
+# Allow Override of Red Hat Ansible Automation Platform (AAP) Version
+ARG AAP_VERSION={{ code_server_aap_version }}
+
+# Allow Override of Red Hat OpenStack Services on OpenShift Tools
+ARG OSO_VERSION={{ code_server_oso_version }}
+
+# Allow Override of MISE Version
+ARG MISE_VERSION={{ code_server_mise_version }}
+
+# Allow Override of Runtime User Details
+ARG USER_NAME=ansible
+ARG USER_COMMENT='Ansible Service Account'
+ARG USER_HOME=/home/ansible
+ARG USER_UID=1000
+ARG USER_GID=1000
+
+# Install Developer Tools
+RUN printf 'Install Developer Tools\n'; \
+    dnf update -y && \
+    dnf module enable -y nodejs:20 && \
+    dnf install -y \
+                --setopt install_weak_deps=false \
+                --nodocs \
+                    bash-completion \
+                    bind-utils \
+                    diffutils \
+                    git \
+                    iputils \
+                    jq \
+                    libatomic \
+                    procps-ng \
+                    qemu-img \
+                    rsync \
+                    sudo \
+                    unzip \
+                    vim-enhanced && \
+    dnf clean all && \
+    rm -rf /var/cache /var/log/dnf* && \
+    python3 -m ensurepip --upgrade && \
+    python3 -m pip install --upgrade pip && \
+    curl -sL "https://github.com/jdx/mise/releases/download/${MISE_VERSION}/mise-${MISE_VERSION}-linux-x64.tar.gz" | tar xzf - --strip-components=1 -C /usr/local && \
+    chown -R root:root /usr/local
+
+# Install code-server from the upstream RPM. Pinned by version and installed with
+# dnf rather than the vendor's `curl | sh` installer, per the container standard.
+# The RPM is unsigned, but dnf's localpkg_gpgcheck is off by default so this needs
+# no --nogpgcheck. Fetched from GitHub over a public CA, so unlike the AAP/RHOSO
+# layers below it does not depend on Satellite.
+RUN printf 'Install code-server\n'; \
+    dnf install -y \
+                --nodocs \
+                    "https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/code-server-${CODE_SERVER_VERSION}-amd64.rpm" && \
+    dnf clean all && \
+    rm -rf /var/cache /var/log/dnf*
+
+# Install Ansible Automation Platform (AAP) Tools
+RUN printf 'Install Ansible Automation Platform (AAP) Tools\n'; \
+    dnf install -y \
+                --enablerepo="ansible-automation-platform-${AAP_VERSION}-for-rhel-9-x86_64-rpms" \
+                --nodocs \
+                --setopt install_weak_deps=false \
+                    ansible-builder \
+                    ansible-creator \
+                    ansible-dev-environment \
+                    ansible-lint \
+                    ansible-navigator \
+                    ansible-sign \
+                    molecule \
+                    python3.12-requests && \
+    dnf clean all && \
+    rm -rf /var/cache /var/log/dnf*
+
+# Install OpenStack Services on OpenShift (OSO) Tools
+RUN printf 'Install OpenStack Services on OpenShift (OSO) Tools\n'; \
+    dnf install -y \
+                --enablerepo="rhoso-tools-${OSO_VERSION}-for-rhel-9-x86_64-rpms" \
+                --setopt install_weak_deps=false  \
+                --nodocs \
+                    python3-cinderclient \
+                    python3-designateclient \
+                    python3-glanceclient \
+                    python3-heatclient \
+                    python3-ironicclient \
+                    python3-novaclient \
+                    python3-octaviaclient \
+                    python3-openstackclient \
+                    python3-swiftclient && \
+    dnf clean all && \
+    rm -rf /var/cache /var/log/dnf*
+
+# Configure Trusted Certificate Authorities
+# Staged into the build context by the role. Required at BUILD time so the dnf
+# layers above can reach Satellite; the Quadlet's runtime CA bind-mount comes far
+# too late for that.
+COPY ca-certs /etc/pki/ca-trust/source/anchors/
+RUN printf 'Configure Trusted Certificate Authorities\n'; \
+    update-ca-trust extract
+
+# Setup Runtime User
+RUN printf 'Setup Runtime User\n'; \
+    groupadd --gid "${USER_GID}" "${USER_NAME}" && \
+    useradd --create-home \
+            --uid "${USER_UID}" \
+            --gid "${USER_GID}" \
+            --home-dir "${USER_HOME}" \
+            --comment "${USER_COMMENT}" \
+            "${USER_NAME}"
+
+# Configure Runtime User
+# /workspaces and the code-server user-data-dir are pre-created and owned by the
+# runtime user so the per-user named volumes mounted over them inherit correct
+# ownership via podman's first-mount copy-up.
+COPY bashrc ${USER_HOME}/.bashrc
+RUN printf 'Configure Runtime User\n'; \
+    printf "${USER_NAME} ALL=(ALL) NOPASSWD: ALL" > "/etc/sudoers.d/${USER_NAME}" && \
+    mkdir -p /workspaces "${USER_HOME}/.local/share/code-server" && \
+    chown -R "${USER_NAME}:${USER_NAME}" "${USER_HOME}" /workspaces
+
+# Switch to Runtime User
+USER ${USER_NAME}
+WORKDIR ${USER_HOME}
+
+# Configure Runtime User Workspace
+RUN printf 'Configure Runtime User Workspace\n'; \
+    source ${USER_HOME}/.bashrc && \
+    python3.12 -m ensurepip --upgrade && \
+    python3.12 -m pip install --upgrade pip && \
+    python3.12 -m pip install --no-cache-dir --ignore-installed antsibull-changelog pywinrm netaddr lxml
+
+LABEL org.opencontainers.image.title="code-server" \
+      org.opencontainers.image.description="code-server (VS Code in the browser) on the SOE workspace image (AAP + RHOSO tooling)" \
+      org.opencontainers.image.version="{{ code_server_version }}" \
+      org.opencontainers.image.licenses="GPL-2.0-or-later" \
+      org.opencontainers.image.base.name="{{ code_server_base_image }}"

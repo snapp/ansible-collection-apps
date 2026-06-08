@@ -1,0 +1,53 @@
+# {{ ansible_managed }}
+# Google Workspace MCP bridge image: mcpo (stdio -> OpenAPI/HTTP) + the
+# @aaronsb/google-workspace-mcp stdio server + Google's `gws` CLI engine.
+#
+# Built on UBI 10 per the project container standard. RHEL 10 ships Node.js 22
+# and Python 3.12 as plain AppStream packages (no module streams), so mcpo is
+# reconstructed cleanly here instead of layering on the upstream Debian image.
+FROM {{ ai_gws_base_image }}
+
+ARG MCPO_VERSION={{ ai_gws_mcpo_version }}
+ARG GWS_MCP_VERSION={{ ai_gws_server_version }}
+ARG GWS_CLI_VERSION={{ ai_gws_gws_cli_version }}
+
+# Node.js (runs google-workspace-mcp) + Python/pip (runs mcpo).
+RUN dnf -y install --setopt=install_weak_deps=False \
+        nodejs npm python3 python3-pip \
+    && dnf -y clean all \
+    && rm -rf /var/cache/dnf
+
+# mcpo in an isolated virtualenv (no system-site-packages pollution). The venv
+# bin dir goes on PATH so the `mcpo` console script resolves.
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+RUN pip install --no-cache-dir "mcpo==${MCPO_VERSION}"
+
+# The stdio MCP server + its gws engine, pinned and installed globally so the
+# `google-workspace-mcp` and `gws` binaries are on PATH for mcpo to spawn.
+RUN curl -sL "https://github.com/googleworkspace/cli/releases/download/${GWS_CLI_VERSION}/google-workspace-cli-<target>.tar.gz" | tar xzf - -C /usr/local/bin gws && \
+    chown -R root:root /usr/local && \
+    npm install -g --no-fund --no-audit "@aaronsb/google-workspace-mcp@${GWS_MCP_VERSION}"
+
+# Non-root runtime user with a real HOME. The XDG dirs are pre-created and owned
+# by that user so the per-user named volumes mounted over them inherit correct
+# ownership via podman's copy-up.
+RUN useradd --system --create-home --home-dir /home/mcpo --uid 1001 mcpo \
+    && mkdir -p /home/mcpo/.config /home/mcpo/.local/share /app/config \
+    && chown -R mcpo:mcpo /home/mcpo /app
+
+# HOME so google-workspace-mcp/gws resolve their XDG paths; NODE_EXTRA_CA_CERTS
+# so Node trusts the IdM-signed CA bundle mounted by the Quadlet.
+ENV HOME=/home/mcpo \
+    SSL_CERT_FILE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
+    REQUESTS_CA_BUNDLE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
+    NODE_EXTRA_CA_CERTS=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+
+USER mcpo
+
+LABEL org.opencontainers.image.title="ai-gws" \
+      org.opencontainers.image.description="mcpo bridge for aaronsb/google-workspace-mcp (per-account Google Workspace tool server)" \
+      org.opencontainers.image.licenses="GPL-2.0-or-later" \
+      org.opencontainers.image.base.name="{{ ai_gws_base_image }}"
+
+ENTRYPOINT ["mcpo"]

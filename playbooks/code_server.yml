@@ -1,0 +1,25 @@
+---
+
+- name: Code Server Web Integrated Development Environment (IDE)
+  hosts: "{{ target | default('code_server') }}"
+  gather_facts: false
+  become: true
+  tags:
+    - apps
+    - code_server
+  pre_tasks:
+    - name: Assert required code_server configuration and secrets are provided
+      ansible.builtin.assert:
+        that:
+          - code_server_users is defined and code_server_users | length > 0
+          - code_server_bind_address is defined and code_server_bind_address | length > 0
+          - code_server_users | selectattr('password', 'defined')
+            | selectattr('password', 'truthy') | list | length == code_server_users | length
+        fail_msg: >-
+          A non-empty code_server_users list (each entry with a username, a unique
+          port, and a non-empty password) and code_server_bind_address (the LAN IP
+          this host publishes on, which Caddy proxies to) are required. Provide the
+          passwords via AAP credential injectors or -e extra_vars.
+        quiet: true
+  roles:
+    - role: code_server

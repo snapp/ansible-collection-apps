@@ -1,0 +1,24 @@
+---
+# https://console.redhat.com/ansible/automation-hub/collections/published/redhat/rhel_system_roles/documentation/role/podman
+
+- name: Deploy AI inference Podman network Quadlet unit
+  ansible.builtin.include_role:
+    name: redhat.rhel_system_roles.podman
+  vars:
+    podman_run_as_user: "{{ ai_inference_service_user }}"
+    podman_systemd_unit_scope: user
+    podman_activate_systemd_unit: true
+    podman_quadlet_specs:
+      - name: ai
+        type: network
+        state: present
+        file_content: |
+          [Network]
+          NetworkName=ai
+          Label=app=ai-stack
+
+- name: Deploy AI inference VLLM Quadlet units
+  ansible.builtin.include_tasks: vllm.yml
+
+- name: Deploy AI inference Ollama Quadlet units
+  ansible.builtin.include_tasks: ollama.yml

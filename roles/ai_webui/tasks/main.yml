@@ -1,0 +1,93 @@
+---
+- name: Store WebUI OIDC secrets
+  ansible.builtin.include_role:
+    name: redhat.rhel_system_roles.podman
+  vars:
+    podman_run_as_user: "{{ ai_webui_service_user }}"
+    podman_systemd_unit_scope: user
+    podman_secrets:
+      - name: ai-webui-oauth-client-id
+        state: present
+        data: "{{ ai_webui_oauth_client_id }}"
+
+      - name: ai-webui-oauth-client-secret
+        state: present
+        data: "{{ ai_webui_oauth_client_secret }}"
+  no_log: true
+
+- name: Deploy WebUI Quadlet units
+  ansible.builtin.include_role:
+    name: redhat.rhel_system_roles.podman
+  vars:
+    podman_run_as_user: "{{ ai_webui_service_user }}"
+    podman_systemd_unit_scope: user
+    podman_activate_systemd_unit: true
+    podman_quadlet_specs:
+      - name: ai-webui
+        type: volume
+        state: started
+        file_content: |
+          [Volume]
+          VolumeName=ai-webui
+          Label=app=ai-stack
+
+      - name: ai-webui
+        type: container
+        pull_image: "{{ podman_pull_image | bool | default(false) }}"
+        continue_if_pull_fails: true
+        state: started
+        file_content: |
+          [Unit]
+          Description=AI Web User Interface (UI)
+          After=local-fs.target network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Restart=on-failure
+          RestartSec=10
+          TimeoutStartSec=120
+
+          [Container]
+          ContainerName=ai-webui
+          Image={{ ai_webui_image }}
+
+          {% for port in ai_webui_publish_ports %}
+          PublishPort={{ port }}
+          {% endfor %}
+
+          # OIDC client credentials from Podman secrets
+          Secret=ai-webui-oauth-client-id,type=env,target=OAUTH_CLIENT_ID
+          Secret=ai-webui-oauth-client-secret,type=env,target=OAUTH_CLIENT_SECRET
+
+          # Persist chat history and settings across container restarts
+          Volume=ai-webui.volume:/app/backend/data:z
+
+          # Mount host consolidated trust bundle for IdM-signed certs
+          Volume=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem:/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem:ro
+
+          # Ensure TLS stack can find the CA bundle
+          Environment=SSL_CERT_FILE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+          Environment=REQUESTS_CA_BUNDLE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+
+          # Non-secret OIDC configuration
+          Environment=OPENID_PROVIDER_URL={{ keycloak_base_url }}/realms/{{ keycloak_primary_realm }}/.well-known/openid-configuration
+
+          # Authentication — Keycloak OIDC only; local login form disabled
+          Environment=WEBUI_AUTH=True
+          Environment=ENABLE_LOGIN_FORM=False
+          Environment=ENABLE_SIGNUP=False
+          Environment=ENABLE_OAUTH_SIGNUP=True
+          Environment=OAUTH_MERGE_ACCOUNTS_BY_EMAIL=True
+          Environment=OAUTH_PROVIDER_NAME=Keycloak
+
+          # Group-based access control via Keycloak:
+          Environment=OAUTH_ROLES_CLAIM=groups
+          Environment=OAUTH_ALLOWED_ROLES=webui-user,webui-admin
+          Environment=OAUTH_ADMIN_ROLES=webui-admin
+          Environment=DEFAULT_USER_ROLE=user
+
+          # Primary network — same bridge as inference containers for direct name resolution
+          Network=ai.network
+
+          [Install]
+          WantedBy=default.target

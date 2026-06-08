@@ -1,0 +1,102 @@
+---
+# https://console.redhat.com/ansible/automation-hub/collections/published/redhat/rhel_system_roles/documentation/role/podman
+#
+# One code-server container per developer, each under that developer's OWN
+# rootless OS/IdM account. Shared once here (build context, image definition);
+# per-developer resources are looped in user.yml.
+
+- name: Validate each code_server user entry
+  ansible.builtin.assert:
+    that:
+      - __code_server_user.username is defined
+      - __code_server_user.username is match('^[a-z0-9-]+$')
+      - __code_server_user.port is defined
+      - __code_server_user.port is integer
+      - __code_server_user.password is defined
+      - __code_server_user.password | length > 0
+    quiet: true
+    fail_msg: >-
+      Invalid code_server_users entry '{{ __code_server_user.username | default('<no username>') }}':
+      require a DNS-safe username (^[a-z0-9-]+$) that is also a real OS/IdM account,
+      an integer port, and a non-empty password.
+  loop: "{{ code_server_users }}"
+  loop_control:
+    loop_var: __code_server_user
+    label: "{{ __code_server_user.username | default('?') }}"
+  no_log: true
+
+# A duplicate port would silently give two developers the same listener; the
+# second container simply fails to bind. Catch it before anything is deployed.
+- name: Assert every code_server user has a distinct port
+  ansible.builtin.assert:
+    that:
+      - code_server_users | map(attribute='port') | unique | length == code_server_users | length
+    quiet: true
+    fail_msg: >-
+      code_server_users contains duplicate port values. Each developer needs a
+      unique host port — it is also baked into their firewalld rule and Caddy block.
+
+- name: Allow containers to read host CA certificates (SELinux)
+  ansible.posix.seboolean:
+    name: container_read_certs
+    state: true
+    persistent: true
+  become: true
+
+# Root-owned and world-readable: every rootless developer builds from this
+# context, but none of them may modify what the others build.
+- name: Ensure the image build context directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - "{{ code_server_build_dir }}"
+    - "{{ code_server_build_dir }}/ca-certs"
+  become: true
+  tags: code_server_build
+
+- name: Stage the code-server container build context
+  ansible.builtin.template:
+    src: Containerfile.j2
+    dest: "{{ code_server_build_dir }}/Containerfile"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  notify: Restart code_server instances
+  tags: code_server_build
+
+- name: Stage the runtime user shell profile
+  ansible.builtin.copy:
+    src: bashrc
+    dest: "{{ code_server_build_dir }}/bashrc"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  notify: Restart code_server instances
+  tags: code_server_build
+
+# Build-time trust for Satellite. The AAP/RHOSO dnf layers run long before the
+# Quadlet's runtime CA bind-mount exists, so the anchor must be in the context.
+- name: Stage the host CA into the build context
+  ansible.builtin.copy:
+    src: "{{ code_server_ca_trust_src }}"
+    dest: "{{ code_server_build_dir }}/ca-certs/ca.crt"
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  notify: Restart code_server instances
+  tags: code_server_build
+
+- name: Configure one isolated code-server per developer
+  ansible.builtin.include_tasks: user.yml
+  loop: "{{ code_server_users }}"
+  loop_control:
+    loop_var: __code_server_user
+    label: "{{ __code_server_user.username }}"

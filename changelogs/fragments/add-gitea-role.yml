@@ -1,0 +1,5 @@
+---
+minor_changes:
+  - gitea role - add a role and ``playbooks/gitea.yml`` to deploy the self-hosted
+    Gitea Git service as a rootless Podman Quadlet (SQLite-backed), wired into
+    ``playbooks/site.yml``. Ships a reference Caddy site block for TLS fronting.

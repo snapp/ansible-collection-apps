@@ -1,0 +1,8 @@
+{# Per-user mcpo config. Non-secret: the Google account identity comes from the
+   tokens in this container's mounted volumes, and GOOGLE_CLIENT_ID/SECRET are
+   injected as env (Podman secrets), inherited by the stdio child. #}
+{% set server = {"command": "google-workspace-mcp"} %}
+{% if ai_gws_disabled_tools | length > 0 %}
+{%   set _ = server.update({"disabledTools": ai_gws_disabled_tools}) %}
+{% endif %}
+{{ {"mcpServers": {ai_gws_server_name: server}} | to_nice_json }}

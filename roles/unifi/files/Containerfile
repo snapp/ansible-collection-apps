@@ -1,0 +1,52 @@
+# Ubuntu Minimal 24.04 (Noble) LTS as the base image
+FROM ubuntu:24.04
+
+# Allow Override of Mongo Version
+ARG MONGO_VERSION=7.0
+
+# Allow Override of UniFi Controller Version
+ARG UNIFI_VERSION=8.6.9
+
+# Specify the recommended volume mounts
+VOLUME ["/var/lib/unifi", "/var/log/unifi"]
+
+# Set non-interactive frontend to prevent prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Update the package list and install required packages
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends apt-transport-https ca-certificates gnupg2 curl && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Add the MongoDB repository
+RUN curl -k -fsSL "https://pgp.mongodb.com/server-${MONGO_VERSION}.asc" | gpg --dearmor -o "/usr/share/keyrings/mongodb-server-${MONGO_VERSION}.gpg" && \
+    echo "deb [ arch=amd64, signed-by=/usr/share/keyrings/mongodb-server-${MONGO_VERSION}.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/${MONGO_VERSION} multiverse" > /etc/apt/sources.list.d/98-mongodb-org.list
+
+# Install mongo shell client
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends mongodb-mongosh && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir -p /usr/lib/unifi/bin
+
+# Install the UniFi Controller
+RUN curl -LO https://dl.ui.com/unifi/${UNIFI_VERSION}/unifi_sysvinit_all.deb && \
+    apt-get update && \
+    apt-get install -y ./unifi_sysvinit_all.deb && \
+    rm unifi_sysvinit_all.deb && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy the entrypoint script responsible for starting the UniFi Controller service
+COPY entrypoint.sh /usr/lib/unifi/bin/entrypoint.sh
+RUN chmod +x /usr/lib/unifi/bin/entrypoint.sh && \
+    chown -R unifi:unifi /usr/lib/unifi /var/log/unifi
+
+WORKDIR /usr/lib/unifi
+USER unifi
+
+# Lifecycle is owned by the host's systemd via the Quadlet, so the controller
+# runs in the foreground. The Quadlet sets Exec=/usr/lib/unifi/bin/entrypoint.sh
+# explicitly, but ENTRYPOINT keeps the image runnable on its own too.
+ENTRYPOINT ["/usr/lib/unifi/bin/entrypoint.sh"]

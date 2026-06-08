@@ -1,0 +1,18 @@
+---
+
+ai_webui_service_user: ai
+
+ai_webui_service_group: ai
+
+ai_webui_image: 'ghcr.io/open-webui/open-webui:main'
+
+ai_webui_url: 'https://webui.example.org'
+
+ai_webui_publish_ports:
+  - '127.0.0.1:8080:8080'
+
+ai_webui_default_chat_api_base_url: 'http://ai-chat:8000/v1'
+
+ai_webui_default_vision_api_base_url: 'http://ai-vision:8000/v1'
+
+ai_webui_default_ollama_api_base_url: 'http://ai-ollama:11434'

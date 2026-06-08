@@ -1,0 +1,18 @@
+---
+
+- name: Artificial Intelligence (AI) Inference
+  hosts: "{{ target | default('ai_inference') }}"
+  gather_facts: false
+  become: true
+  tags:
+    - apps
+    - ai
+    - ai_inference
+  pre_tasks:
+    - name: Assert HuggingFace token is provided
+      ansible.builtin.assert:
+        that:
+          - ai_inference_huggingface_api_token is defined and ai_inference_huggingface_api_token | length > 0
+        fail_msg: ai_inference_huggingface_api_token is required for AI model retrieval
+  roles:
+    - role: ai_inference

@@ -1,0 +1,4 @@
+---
+breaking_changes:
+  - Renamed the ``site_ite`` playbook to ``site``. Update any references from
+    ``infra.apps.site_ite`` to ``infra.apps.site``.

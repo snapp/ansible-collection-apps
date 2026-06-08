@@ -1,0 +1,23 @@
+---
+
+galaxy_info:
+  author: Christopher A. Snapp
+  description: >-
+    Deploy aaronsb/google-workspace-mcp as one isolated rootless Podman Quadlet
+    per Google account, bridged to Open WebUI with mcpo. Part of the AI stack.
+  license: GPL-2.0-or-later
+  min_ansible_version: '2.15'
+  platforms:
+    - name: EL
+      versions:
+        - '10'
+  galaxy_tags:
+    - ai
+    - mcp
+    - google
+    - workspace
+    - openwebui
+    - podman
+    - quadlet
+
+dependencies: []

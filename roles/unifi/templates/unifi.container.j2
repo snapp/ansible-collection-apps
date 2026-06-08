@@ -1,0 +1,32 @@
+[Unit]
+Description=UniFi Network Application — self-hosted network controller
+After=local-fs.target network-online.target
+Wants=network-online.target
+
+[Service]
+# UniFi + embedded MongoDB can take a while to come up on first start / upgrade
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=300
+
+[Container]
+ContainerName=ubiquiti-unifi
+Image={{ unifi_image }}
+
+# Run the controller in the foreground (image ENTRYPOINT does the same, but set
+# explicitly so the unit is self-documenting).
+Exec=/usr/lib/unifi/bin/entrypoint.sh
+
+# Persistent state: site config, device DB, embedded MongoDB data
+Volume=unifi-data.volume:/var/lib/unifi:z
+# Persistent logs (server.log, mongod.log) for troubleshooting across restarts
+Volume=unifi-logs.volume:/var/log/unifi:z
+# Runtime PID/socket dir — ephemeral, never needs to persist
+Tmpfs=/var/run/unifi
+
+{% for port in unifi_publish_ports %}
+PublishPort={{ port }}
+{% endfor %}
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,18 @@
+---
+
+# The podman system role starts/restarts units whose content changed, but the
+# bind-mounted config.json and the shared image tag are outside the unit content,
+# so a config render or image rebuild must restart the running containers here.
+# Restarting every instance is intentional: an image rebuild affects them all,
+# and config/image changes are rare.
+- name: Restart ai_gws instances
+  ansible.builtin.systemd:
+    name: "ai-gws-{{ __ai_gws_user.username }}.service"
+    state: restarted
+    scope: user
+  become: true
+  become_user: "{{ ai_gws_service_user }}"
+  loop: "{{ ai_gws_users }}"
+  loop_control:
+    loop_var: __ai_gws_user
+    label: "{{ __ai_gws_user.username }}"

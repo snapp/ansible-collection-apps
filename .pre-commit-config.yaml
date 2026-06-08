@@ -1,0 +1,51 @@
+---
+
+# https://pre-commit.ci
+ci:
+  autoupdate_branch: main
+  autoupdate_schedule: weekly
+  autoupdate_prs: true
+
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/ansible/ansible-lint
+    rev: v26.3.0
+    hooks:
+      - id: ansible-lint
+        language_version: python3.12
+        additional_dependencies:
+          - requests>=1.1
+
+  - repo: https://github.com/adrienverge/yamllint.git
+    rev: v1.38.0
+    hooks:
+      - id: yamllint
+        language_version: python3.12
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-ast
+      - id: check-executables-have-shebangs
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-symlinks
+      - id: check-yaml
+        exclude: .*/\.github/.*
+      - id: end-of-file-fixer
+      - id: fix-encoding-pragma
+      - id: mixed-line-ending
+        args:
+          - --fix=lf
+      - id: pretty-format-json
+        args:
+          - --autofix          # Enable autofixing
+          - --indent=2         # Specify indentation
+          - --no-ensure-ascii  # handle non-ascii
+      - id: requirements-txt-fixer
+      - id: trailing-whitespace

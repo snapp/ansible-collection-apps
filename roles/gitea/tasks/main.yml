@@ -1,0 +1,34 @@
+---
+
+- name: Enable lingering so the rootless Gitea units start at boot
+  ansible.builtin.command:
+    cmd: "loginctl enable-linger {{ gitea_service_user }}"
+    creates: "/var/lib/systemd/linger/{{ gitea_service_user }}"
+  become: true
+
+- name: Deploy Gitea Quadlet units
+  ansible.builtin.include_role:
+    name: redhat.rhel_system_roles.podman
+  vars:
+    podman_run_as_user: "{{ gitea_service_user }}"
+    podman_systemd_unit_scope: user
+    podman_activate_systemd_unit: true
+    podman_quadlet_specs:
+      - name: gitea-data
+        type: volume
+        state: started
+        file_content: |
+          [Volume]
+          VolumeName=gitea-data
+          Label=app=gitea
+      - name: gitea-config
+        type: volume
+        state: started
+        file_content: |
+          [Volume]
+          VolumeName=gitea-config
+          Label=app=gitea
+      - name: gitea
+        type: container
+        state: started
+        file_content: "{{ lookup('template', role_path + '/templates/gitea.container.j2') }}"

@@ -1,0 +1,9 @@
+---
+
+ai_inference_service_user: ai
+
+ai_inference_service_group: ai
+
+ai_inference_vllm_image: 'registry.redhat.io/rhaiis/vllm-cuda-rhel9:latest'
+
+ai_inference_ollama_image: 'docker.io/ollama/ollama:latest'

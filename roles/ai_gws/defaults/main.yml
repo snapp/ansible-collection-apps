@@ -1,0 +1,91 @@
+---
+
+# ---------------------------------------------------------------------------
+# Service identity — part of the AI stack, so this runs as the same rootless
+# `ai` user as ai_webui / ai_inference and joins the same `ai.network`. That
+# co-location is what lets Open WebUI resolve each tool server by container name
+# with no published host port. The `ai` user must already exist (IdM) with
+# subuid/subgid ranges; the role enables linger so the units survive reboots.
+# ---------------------------------------------------------------------------
+ai_gws_service_user: ai
+
+ai_gws_service_group: ai
+
+# Existing shared bridge created by the ai_inference role (`Network=ai.network`).
+# ai_inference must have run on this host first; ai_gws only joins it.
+ai_gws_network: ai
+
+# Internal port every mcpo instance listens on. Nothing is published to the
+# host — containers are reached by name over ai.network
+# (http://ai-gws-<username>:{{ ai_gws_port }}), so a single shared port is fine.
+ai_gws_port: 8600
+
+# mcpo route name for the bridged stdio server. Each container is separate, so
+# the same route name is reused across users (per-container isolation, not routing).
+ai_gws_server_name: google-workspace
+
+# ---------------------------------------------------------------------------
+# Container image — built once on this host and shared by every per-user
+# container (overlay layers are shared; the build cost is paid once).
+#
+# Built from UBI 10 per the project container standard (RHEL 10 ships Node 22
+# and Python 3.12 as plain AppStream packages), rather than layering on the
+# upstream Debian-based mcpo image. The image tag embeds the server version so a
+# version bump forces a rebuild instead of reusing a stale image.
+# ---------------------------------------------------------------------------
+ai_gws_base_image: registry.access.redhat.com/ubi10:latest
+
+# mcpo (stdio -> OpenAPI/HTTP bridge), from PyPI.
+ai_gws_mcpo_version: '0.0.20'
+
+# https://github.com/aaronsb/google-workspace-mcp
+# @aaronsb/google-workspace-mcp (the stdio MCP server), from npm.
+ai_gws_server_version: '2.7.1'
+
+# https://github.com/googleworkspace/cli/releases
+# @googleworkspace/cli (the `gws` engine the server shells out to), from npm.
+ai_gws_gws_cli_version: '0.22.5'
+
+# Node.js major shipped by UBI 10 AppStream. Pin deliberately.
+ai_gws_nodejs_version: '22'
+
+ai_gws_image: "localhost/ai-gws:{{ ai_gws_server_version }}"
+
+# Host directory used as the `podman build` context (Containerfile).
+ai_gws_build_dir: /opt/ai-gws/build
+
+# Host directory holding the per-user rendered mcpo config.json files
+# ({{ ai_gws_config_dir }}/<username>/config.json). Non-secret.
+ai_gws_config_dir: /opt/ai-gws/config
+
+# ---------------------------------------------------------------------------
+# Tenants — one isolated container per Google account. Each entry becomes a
+# container `ai-gws-<username>`, a pair of named volumes holding ONLY that
+# account's registry + OAuth tokens, and a distinct mcpo Bearer key. Register
+# each as its own Open WebUI External Tool connection, ACL'd to one user.
+#
+# ai_gws_users:
+#   - username: alice              # DNS-safe: ^[a-z0-9-]+$ (used in names)
+#     google_account: alice@example.org
+#     owui_group: gws-alice        # the Open WebUI group-of-one to ACL to (doc only)
+#     api_key: "{{ _vault_ai_gws_alice_api_key }}"   # distinct per user; openssl rand -hex 32
+# ---------------------------------------------------------------------------
+ai_gws_users: []
+
+# Read-only posture: the authoritative control is granting only read-only Google
+# scopes at consent (enforced by Google). As an mcpo-level guard you may also
+# disable write-capable tools here; the list is passed to mcpo `disabledTools`.
+# Confirm exact tool names against the server before relying on this.
+ai_gws_disabled_tools: []
+
+# ---------------------------------------------------------------------------
+# Secrets — supplied at run time via AAP credential injectors / vault, never
+# committed. Asserted by playbooks/ai_gws.yml. NOT defaulted here.
+#
+#   ai_gws_google_client_id       # shared GCP OAuth *client* id  (the app identity)
+#   ai_gws_google_client_secret   # shared GCP OAuth *client* secret
+#   <each ai_gws_users[].api_key> # per-user mcpo Bearer key (distinct per user)
+#
+# The GCP client is shared by every container (one OAuth app); only each user's
+# OAuth *tokens* are isolated, written into that user's volumes at first consent.
+# ---------------------------------------------------------------------------

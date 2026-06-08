@@ -1,0 +1,8 @@
+---
+- name: Restart ai-webui
+  ansible.builtin.systemd:
+    name: ai-webui.service
+    state: restarted
+    scope: user
+  become: true
+  become_user: "{{ ai_webui_service_user }}"

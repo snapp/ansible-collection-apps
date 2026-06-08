@@ -1,0 +1,73 @@
+---
+
+- name: Ensure UniFi build context directory exists
+  ansible.builtin.file:
+    path: "{{ unifi_build_dir }}"
+    state: directory
+    owner: "{{ unifi_service_user }}"
+    group: "{{ unifi_service_group }}"
+    mode: '0755'
+  become: true
+  tags: unifi_build
+
+- name: Enable lingering so the rootless UniFi units start at boot
+  ansible.builtin.command:
+    cmd: "loginctl enable-linger {{ unifi_service_user }}"
+    creates: "/var/lib/systemd/linger/{{ unifi_service_user }}"
+  become: true
+
+- name: Stage UniFi container build context
+  ansible.builtin.copy:
+    src: "{{ item.name }}"
+    dest: "{{ unifi_build_dir }}/{{ item.name }}"
+    owner: "{{ unifi_service_user }}"
+    group: "{{ unifi_service_group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - {name: Containerfile, mode: '0644'}
+    - {name: entrypoint.sh, mode: '0755'}
+  become: true
+  notify: Restart unifi
+  tags: unifi_build
+
+- name: Build the UniFi controller image
+  redhat.rhel_system_roles.podman_image:
+    name: "{{ unifi_image }}"
+    path: "{{ unifi_build_dir }}"
+    build:
+      format: docker
+      extra_args: >-
+        --build-arg UNIFI_VERSION={{ unifi_version }}
+        --build-arg MONGO_VERSION={{ unifi_mongo_version }}
+    force: false
+  become: true
+  become_user: "{{ unifi_service_user }}"
+  notify: Restart unifi
+  tags: unifi_build
+
+- name: Deploy UniFi Quadlet units
+  ansible.builtin.include_role:
+    name: redhat.rhel_system_roles.podman
+  vars:
+    podman_run_as_user: "{{ unifi_service_user }}"
+    podman_systemd_unit_scope: user
+    podman_activate_systemd_unit: true
+    podman_quadlet_specs:
+      - name: unifi-data
+        type: volume
+        state: started
+        file_content: |
+          [Volume]
+          VolumeName=unifi-data
+          Label=app=unifi
+      - name: unifi-logs
+        type: volume
+        state: started
+        file_content: |
+          [Volume]
+          VolumeName=unifi-logs
+          Label=app=unifi
+      - name: ubiquiti-unifi
+        type: container
+        state: started
+        file_content: "{{ lookup('template', role_path + '/templates/unifi.container.j2') }}"

@@ -1,0 +1,22 @@
+---
+namespace: infra
+name: apps
+version: 1.0.0
+readme: README.md
+description: >-
+  Collection for deploying self-hosted application services (AI inference,
+  Matrix homeserver, monitoring, and more) via rootless Podman Quadlets on
+  RHEL using redhat.rhel_system_roles.podman.
+authors:
+  - snappca@gmail.com
+license_file: "LICENSE"
+tags:
+  - infrastructure
+  - linux
+  - rhel
+  - podman
+  - quadlet
+dependencies:
+  redhat.rhel_system_roles: ">=1.22.0"
+  containers.podman: '>=1.20.2'
+repository: "https://github.com/snapp/ansible-collection-apps"

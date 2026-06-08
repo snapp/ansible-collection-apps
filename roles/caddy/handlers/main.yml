@@ -1,0 +1,16 @@
+---
+
+- name: Apply sysctl settings
+  ansible.builtin.command:
+    cmd: sysctl --system
+  become: true
+  become_user: root
+  changed_when: true
+
+- name: Restart caddy
+  ansible.builtin.systemd:
+    name: caddy.service
+    state: restarted
+    scope: user
+  become: true
+  become_user: "{{ caddy_service_user }}"

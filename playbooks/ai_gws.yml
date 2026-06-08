@@ -1,0 +1,24 @@
+---
+
+- name: Google Workspace MCP Tool Servers (per user)
+  hosts: "{{ target | default('ai_webui') }}"
+  gather_facts: false
+  become: true
+  tags:
+    - apps
+    - ai
+    - ai_gws
+  pre_tasks:
+    - name: Assert required ai_gws secrets and tenants are provided
+      ansible.builtin.assert:
+        that:
+          - ai_gws_google_client_id is defined and ai_gws_google_client_id | length > 0
+          - ai_gws_google_client_secret is defined and ai_gws_google_client_secret | length > 0
+          - ai_gws_users is defined and ai_gws_users | length > 0
+        fail_msg: >-
+          ai_gws_google_client_id, ai_gws_google_client_secret, and a non-empty
+          ai_gws_users list are required. Provide the client secrets via AAP
+          credential injectors or -e extra_vars, and each user's api_key too.
+        quiet: true
+  roles:
+    - role: ai_gws

@@ -1,0 +1,218 @@
+---
+# https://console.redhat.com/ansible/automation-hub/collections/published/redhat/rhel_system_roles/documentation/role/podman
+
+- name: vllm | Store HuggingFace API token
+  ansible.builtin.include_role:
+    name: redhat.rhel_system_roles.podman
+  vars:
+    podman_run_as_user: "{{ ai_inference_service_user }}"
+    podman_systemd_unit_scope: user
+    podman_secrets:
+      - name: huggingface-api-token
+        state: present
+        data: "{{ ai_inference_huggingface_api_token }}"
+  no_log: true
+
+- name: vllm | Deploy AI inference VLLM Quadlet units
+  ansible.builtin.include_role:
+    name: redhat.rhel_system_roles.podman
+  vars:
+    podman_run_as_user: "{{ ai_inference_service_user }}"
+    podman_systemd_unit_scope: user
+    podman_activate_systemd_unit: false
+    podman_quadlet_specs:
+      - name: ai-models
+        type: volume
+        state: present
+        file_content: |
+          [Volume]
+          VolumeName=ai-models
+          Label=app=ai-stack
+
+      # `sudo -Hu ai XDG_RUNTIME_DIR=/run/user/$(id -u ai) systemctl --user status ai-model-cache.service`
+      - name: ai-model-cache
+        type: container
+        pull_image: "{{ podman_pull_image | bool | default(false) }}"
+        continue_if_pull_fails: true
+        state: created
+        registry_username: "{{ ai_inference_vllm_registry_username | default(omit) }}"
+        registry_password: "{{ ai_inference_vllm_registry_password | default(omit) }}"
+        file_content: |
+          [Unit]
+          Description=AI Inference Model Cache
+          After=local-fs.target network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          # Allow up to 3 hours for initial download of all models (~80 GB total on first run)
+          TimeoutStartSec=10800
+
+          [Container]
+          ContainerName=ai-model-cache
+          Image={{ ai_inference_vllm_image }}
+          PodmanArgs=--rm
+
+          # Shared model weight cache — persists across container restarts and image updates
+          Volume=ai-models.volume:/var/cache/models:z
+
+          # Override HuggingFace cache location
+          Environment=HF_HOME=/var/cache/models
+
+          # Enable HF Hub access for downloading
+          Environment=HF_HUB_OFFLINE=0
+
+          # HuggingFace token injected from Podman secret
+          Secret=huggingface-api-token,type=env,target=HF_TOKEN
+
+          # Download all models sequentially if not already cached.
+          # Sentinel check on refs/main avoids re-downloading on subsequent starts.
+          Entrypoint=/bin/bash
+          Exec=-c '\
+          {% for model in ai_inference_vllm_models %}
+            (test -f /var/cache/models/hub/models--{{ model | replace('/', '--') }}/refs/main \
+            || hf download {{ model }}){% if not loop.last %} && \
+          {% endif %}{% endfor %}'
+
+          [Install]
+          WantedBy=default.target
+
+      # `sudo -Hu ai XDG_RUNTIME_DIR=/run/user/$(id -u ai) systemctl --user status ai-chat.service`
+      - name: ai-chat
+        type: container
+        pull_image: "{{ podman_pull_image | bool | default(false) }}"
+        continue_if_pull_fails: true
+        state: created
+        registry_username: "{{ ai_inference_vllm_registry_username | default(omit) }}"
+        registry_password: "{{ ai_inference_vllm_registry_password | default(omit) }}"
+        file_content: |
+          [Unit]
+          Description=AI Inference - Chat
+          After=local-fs.target network-online.target ai-model-cache.service
+          Wants=network-online.target
+          Requires=ai-model-cache.service
+
+          [Service]
+          Restart=on-failure
+          RestartSec=10
+          TimeoutStartSec=300
+
+          [Container]
+          ContainerName=ai-chat
+          Image={{ ai_inference_vllm_image }}
+
+          # Shared model weight cache — populated by ai-model-cache.service
+          Volume=ai-models.volume:/var/cache/models:z
+
+          # Override HuggingFace cache location
+          Environment=HF_HOME=/var/cache/models
+
+          # Disable HF Hub access for downloading
+          Environment=HF_HUB_OFFLINE=1
+
+          # TorchInductor cache namespaced per container to avoid conflicts
+          Environment=TORCHINDUCTOR_CACHE_DIR=/var/cache/models/torch-inductor/chat
+
+          Network=ai.network
+
+          {% for port in ai_inference_vllm_chat_publish_ports | default([]) %}
+          # Publish VLLM API - Chat
+          PublishPort={{ port }}
+          {% endfor %}
+
+          # CDI GPU passthrough — requires nvidia-container-toolkit and /etc/cdi/nvidia.yaml
+          # label=disable required for GPU device access (SELinux cannot label CDI devices)
+          PodmanArgs=--security-opt=label=disable --device nvidia.com/gpu=all --shm-size=1g
+
+          # Qwen3-14B w8a8 (community INT8 quantization by nytopop):
+          # w8a8 = INT8 weights + INT8 activations — uses Ampere's native INT8 tensor cores.
+          # Ampere (RTX 3090) has no FP8 hardware; w8a8 is the correct quantization choice.
+          #
+          # SINGLE-MODEL DEPLOYMENT ONLY:
+          #   w8a8 14B weights consume ~14 GB. Vision (BF16 8B, ~16 GB) cannot coexist.
+          #   Stop ai-vision.service before starting ai-chat.service and vice versa.
+          #
+          # Memory rationale (single-model, 24 GB):
+          #   --enforce-eager removes torch.compile + CUDA graph objects (~3 GB)
+          #   Without graphs: weights ~14 GB + CUDA overhead ~1.5 GB ≈ 15.5 GB floor
+          #   gpu-memory-utilization 0.85 → ~20.9 GB ceiling, leaving ~4.27 GB for KV cache
+          #   NOTE|2026-05-06| Reduced from 0.90: Wayland compositor needs ~700 MiB GPU memory;
+          #     0.90 left only ~666 MiB free total, causing visual artifacts under load
+          #   NOTE|2026-05-06| Actual model load is 15.34 GiB — weights + CUDA context overhead
+          #     consumes more than estimated, leaving 4.27 GiB for KV cache
+          #   max-model-len 28000: GQA KV cache fits within 4.27 GB budget at 0.85 utilization
+          #   max-num-seqs 1: single-user workload
+          Exec=--served-model-name Qwen3-14B.w8a8 \
+              --model nytopop/Qwen3-14B.w8a8 \
+              --dtype auto \
+              --gpu-memory-utilization 0.85 \
+              --max-model-len 28000 \
+              --max-num-seqs 1 \
+              --enforce-eager \
+              --enable-auto-tool-choice \
+              --tool-call-parser hermes
+
+      # `sudo -Hu ai XDG_RUNTIME_DIR=/run/user/$(id -u ai) systemctl --user status ai-vision.service`
+      - name: ai-vision
+        type: container
+        state: created
+        registry_username: "{{ ai_inference_vllm_registry_username | default(omit) }}"
+        registry_password: "{{ ai_inference_vllm_registry_password | default(omit) }}"
+        file_content: |
+          [Unit]
+          Description=AI Inference - Vision
+          After=local-fs.target network-online.target ai-model-cache.service
+          Wants=network-online.target
+          Requires=ai-model-cache.service
+
+          [Service]
+          Restart=on-failure
+          RestartSec=10
+          TimeoutStartSec=300
+
+          [Container]
+          ContainerName=ai-vision
+          Image={{ ai_inference_vllm_image }}
+
+          # Shared model weight cache — populated by ai-model-cache.service
+          Volume=ai-models.volume:/var/cache/models:z
+
+          Environment=HF_HOME=/var/cache/models
+          Environment=HF_HUB_OFFLINE=1
+
+          # TorchInductor cache namespaced per container to avoid conflicts
+          Environment=TORCHINDUCTOR_CACHE_DIR=/var/cache/models/torch-inductor/vision
+
+          Network=ai.network
+
+          {% for port in ai_inference_vllm_vision_publish_ports | default([]) %}
+          # Publish VLLM API - Vision
+          PublishPort={{ port }}
+          {% endfor %}
+
+          # CDI GPU passthrough — requires nvidia-container-toolkit and /etc/cdi/nvidia.yaml
+          # label=disable required for GPU device access (SELinux cannot label CDI devices)
+          PodmanArgs=--security-opt=label=disable --device nvidia.com/gpu=all --shm-size=1g
+
+          # Qwen3-VL-8B-Instruct: BF16 (native format from Qwen org)
+          # Ampere (RTX 3090) supports BF16 natively — no quantization penalty here.
+          #
+          # SINGLE-MODEL DEPLOYMENT ONLY:
+          #   BF16 8B weights consume ~16 GB. Two BF16 8B models cannot coexist on 24 GB.
+          #   Stop ai-chat.service before starting ai-vision.service and vice versa.
+          #   To run both simultaneously, revert to w8a8 quantized models (see ai-model-cache comments).
+          #
+          # Memory rationale (single-model, 24 GB):
+          #   --enforce-eager removes ~3 GB torch.compile + CUDA graph objects
+          #   weights ~16 GB + CUDA overhead ~1.5 GB ≈ 17.5 GB floor
+          #   gpu-memory-utilization 0.85 → ~20.4 GB ceiling, leaving ~2.9 GB for KV cache
+          #   max-model-len 4096: receipt image ~1000-1280 visual tokens + prompt fits easily
+          #   max-num-seqs 1: one receipt at a time
+          Exec=--served-model-name Qwen3-VL-8B-Instruct \
+              --model Qwen/Qwen3-VL-8B-Instruct \
+              --dtype auto \
+              --gpu-memory-utilization 0.85 \
+              --max-model-len 4096 \
+              --max-num-seqs 1 \
+              --limit-mm-per-prompt '{"image": 1}'

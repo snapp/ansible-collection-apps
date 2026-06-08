@@ -1,0 +1,115 @@
+---
+# Per-vhost forward-auth sidecar. Included once per caddy_oauth2_proxies entry
+# (loop_var __caddy_oauth2_proxy). Task names are prefixed to satisfy
+# ansible-lint name[prefix].
+#
+# Each container is the Keycloak OIDC client for exactly one vhost — the role
+# code-server cannot play itself, because it has no OIDC support.
+
+- name: oauth2_proxy | Store the OIDC client credentials and cookie secret
+  ansible.builtin.include_role:
+    name: redhat.rhel_system_roles.podman
+  vars:
+    podman_run_as_user: "{{ caddy_service_user }}"
+    podman_systemd_unit_scope: user
+    podman_secrets:
+      - name: "oauth2-proxy-{{ __caddy_oauth2_proxy.name }}-client-id"
+        state: present
+        data: "{{ __caddy_oauth2_proxy.client_id }}"
+
+      - name: "oauth2-proxy-{{ __caddy_oauth2_proxy.name }}-client-secret"
+        state: present
+        data: "{{ __caddy_oauth2_proxy.client_secret }}"
+
+      - name: "oauth2-proxy-{{ __caddy_oauth2_proxy.name }}-cookie-secret"
+        state: present
+        data: "{{ __caddy_oauth2_proxy.cookie_secret }}"
+  no_log: true
+
+- name: oauth2_proxy | Deploy the forward-auth Quadlet unit
+  ansible.builtin.include_role:
+    name: redhat.rhel_system_roles.podman
+  vars:
+    podman_run_as_user: "{{ caddy_service_user }}"
+    podman_systemd_unit_scope: user
+    podman_activate_systemd_unit: true
+    podman_quadlet_specs:
+      - name: "oauth2-proxy-{{ __caddy_oauth2_proxy.name }}"
+        type: container
+        pull_image: "{{ podman_pull_image | bool | default(false) }}"
+        continue_if_pull_fails: true
+        state: started
+        file_content: |
+          {{ ansible_managed | comment }}
+          {% set proxy = __caddy_oauth2_proxy %}
+          [Unit]
+          Description=oauth2-proxy — Keycloak forward-auth for {{ proxy.domain }}
+          After=local-fs.target network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Restart=on-failure
+          RestartSec=10
+          TimeoutStartSec=60
+
+          [Container]
+          ContainerName=oauth2-proxy-{{ proxy.name }}
+          Image={{ caddy_oauth2_proxy_image }}
+          Label=app=caddy
+          Label=oauth2-proxy-domain={{ proxy.domain }}
+
+          # No PublishPort, by design. Caddy resolves this container by name over
+          # {{ caddy_network }}.network, so the auth proxy is unreachable off-host.
+          Network={{ caddy_network }}.network
+
+          # OIDC client credentials + cookie signing key, from Podman secrets.
+          Secret=oauth2-proxy-{{ proxy.name }}-client-id,type=env,target=OAUTH2_PROXY_CLIENT_ID
+          Secret=oauth2-proxy-{{ proxy.name }}-client-secret,type=env,target=OAUTH2_PROXY_CLIENT_SECRET
+          Secret=oauth2-proxy-{{ proxy.name }}-cookie-secret,type=env,target=OAUTH2_PROXY_COOKIE_SECRET
+
+          # --- Provider ---------------------------------------------------------------
+          # keycloak-oidc (not the legacy `keycloak` provider) requires an audience mapper
+          # on the Keycloak client, otherwise every token is rejected as wrong-audience.
+          Environment=OAUTH2_PROXY_PROVIDER=keycloak-oidc
+          Environment=OAUTH2_PROXY_OIDC_ISSUER_URL={{ keycloak_base_url }}/realms/{{ keycloak_primary_realm }}
+          Environment=OAUTH2_PROXY_REDIRECT_URL=https://{{ proxy.domain }}/oauth2/callback
+
+          # --- Forward-auth mode ------------------------------------------------------
+          Environment=OAUTH2_PROXY_HTTP_ADDRESS=0.0.0.0:{{ proxy.port | default(4180) }}
+          # Trust X-Forwarded-* from Caddy (required for correct redirect URLs).
+          Environment=OAUTH2_PROXY_REVERSE_PROXY=true
+          # Emit X-Auth-Request-User/-Email/-Groups/-Preferred-Username from /oauth2/auth.
+          # Without this Caddy has nothing to route on.
+          Environment=OAUTH2_PROXY_SET_XAUTHREQUEST=true
+          # This proxy never proxies anything itself — Caddy does. static://202 gives
+          # /oauth2/auth something to answer with when the session is valid.
+          Environment=OAUTH2_PROXY_UPSTREAMS=static://202
+          # Go straight to Keycloak instead of rendering an interstitial "Sign in with" page.
+          Environment=OAUTH2_PROXY_SKIP_PROVIDER_BUTTON=true
+
+          # --- Authorization ----------------------------------------------------------
+          # Gate 1 of 2: may this person use the app at all? (Gate 2 is Caddy matching the
+          # username to a backend.) The realm's group mappers set full.path=false, so these
+          # are bare names — NOT the `/group` form oauth2-proxy's docs show.
+          Environment=OAUTH2_PROXY_OIDC_GROUPS_CLAIM=groups
+          Environment=OAUTH2_PROXY_ALLOWED_GROUPS={{ proxy.allowed_groups | join(',') }}
+          # Authorization is by group, not email domain; accept any verified email.
+          Environment=OAUTH2_PROXY_EMAIL_DOMAINS=*
+
+          # --- Session cookie ---------------------------------------------------------
+          Environment=OAUTH2_PROXY_COOKIE_SECURE=true
+          Environment=OAUTH2_PROXY_COOKIE_DOMAINS={{ proxy.domain }}
+          Environment=OAUTH2_PROXY_WHITELIST_DOMAINS={{ proxy.domain }}
+
+          # Mount host consolidated trust bundle so the OIDC discovery call trusts the
+          # IdM-signed Keycloak certificate. Go reads SSL_CERT_FILE.
+          Volume=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem:/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem:ro
+          Environment=SSL_CERT_FILE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+
+          # NOTE|2026-07-09| No HealthCmd: the upstream image is distroless (only
+          # /bin/oauth2-proxy, no shell or curl), so an in-container probe cannot run.
+          # /ping is still served for external checks; Caddy failing forward_auth is the
+          # real signal. Switch to the `-alpine` tag if a healthcheck becomes necessary.
+
+          [Install]
+          WantedBy=default.target

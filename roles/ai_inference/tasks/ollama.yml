@@ -1,0 +1,54 @@
+---
+
+- name: ollama | Deploy AI inference Ollama Quadlet units
+  ansible.builtin.include_role:
+    name: redhat.rhel_system_roles.podman
+  vars:
+    podman_run_as_user: "{{ ai_inference_service_user }}"
+    podman_systemd_unit_scope: user
+    podman_activate_systemd_unit: true
+    podman_quadlet_specs:
+      - name: ai-ollama-models
+        type: volume
+        state: present
+        file_content: |
+          [Volume]
+          VolumeName=ai-ollama-models
+          Label=app=ai-stack
+
+      - name: ai-ollama
+        type: container
+        pull_image: "{{ podman_pull_image | bool | default(false) }}"
+        continue_if_pull_fails: true
+        state: created
+        file_content: |
+          [Unit]
+          Description=AI Inference - Ollama utilities (autocomplete and embeddings)
+          After=local-fs.target network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Restart=on-failure
+          RestartSec=10
+          TimeoutStartSec=120
+
+          [Container]
+          ContainerName=ai-ollama
+          Image={{ ai_inference_ollama_image }}
+
+          Volume=ai-ollama-models.volume:/var/lib/ollama/models:z
+
+          Network=ai.network
+
+          {% for port in ai_inference_ollama_publish_ports | default([]) %}
+          # Publish Ollama API
+          PublishPort={{ port }}
+          {% endfor %}
+
+          # CDI GPU passthrough
+          # label=disable required for GPU device access (SELinux cannot label CDI devices)
+          PodmanArgs=--security-opt=label=disable --device nvidia.com/gpu=all
+
+          # Cap VRAM to 2 GiB so utility models do not compete with RHAIIS inference containers.
+          # 2147483648 = 2 GiB; leaves RHAIIS with its full gpu-memory-utilization budget.
+          Environment=OLLAMA_MAX_VRAM=2147483648

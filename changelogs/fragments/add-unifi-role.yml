@@ -1,0 +1,5 @@
+---
+minor_changes:
+  - unifi role - add a role and ``playbooks/unifi.yml`` to build and deploy the
+    self-hosted UniFi Network Application (controller) as a rootless Podman
+    Quadlet. Pinned to the 8.6.x line for legacy USG compatibility.

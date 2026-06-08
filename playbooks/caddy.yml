@@ -1,0 +1,17 @@
+---
+
+- name: Caddy Transport Layer Security (TLS) Reverse Proxy
+  hosts: "{{ target | default('caddy') }}"
+  gather_facts: false
+  become: true
+  tags:
+    - apps
+    - caddy
+  pre_tasks:
+    - name: Assert caddy_domains is provided
+      ansible.builtin.assert:
+        that:
+          - caddy_domains is defined and caddy_domains | length > 0
+        fail_msg: caddy_domains list is required for Caddy configuration
+  roles:
+    - role: caddy

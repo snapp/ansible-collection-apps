@@ -1,0 +1,44 @@
+[Unit]
+Description=Gitea Source Code Management (SCM)
+After=local-fs.target network-online.target
+Wants=network-online.target
+
+[Service]
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=120
+
+[Container]
+ContainerName=gitea
+Image={{ gitea_image }}
+
+# Persistent repositories, LFS, avatars, and the SQLite database
+Volume=gitea-data.volume:/var/lib/gitea:z
+# Persistent app.ini — the generated SECRET_KEY / INTERNAL_TOKEN must survive
+# restarts, otherwise existing sessions and tokens are invalidated on each start
+Volume=gitea-config.volume:/etc/gitea:z
+
+{% for port in gitea_publish_ports %}
+PublishPort={{ port }}
+{% endfor %}
+
+# --- Server ----------------------------------------------------------------
+Environment=GITEA__server__ROOT_URL={{ gitea_root_url }}
+Environment=GITEA__server__DOMAIN={{ gitea_domain }}
+Environment=GITEA__server__HTTP_PORT=3000
+Environment=GITEA__server__SSH_DOMAIN={{ gitea_domain }}
+# Advertised in ssh:// clone URLs — the host-published port, not the internal one
+Environment=GITEA__server__SSH_PORT={{ gitea_ssh_host_port }}
+Environment=GITEA__server__SSH_LISTEN_PORT=2222
+
+# --- Database (SQLite — sufficient for a lab; swap to postgres for scale) ---
+Environment=GITEA__database__DB_TYPE=sqlite3
+Environment=GITEA__database__PATH=/var/lib/gitea/data/gitea.db
+
+# --- Service ---------------------------------------------------------------
+# Skip the web installer; all configuration is supplied by these env vars
+Environment=GITEA__security__INSTALL_LOCK=true
+Environment=GITEA__service__DISABLE_REGISTRATION={{ gitea_disable_registration | string | lower }}
+
+[Install]
+WantedBy=default.target

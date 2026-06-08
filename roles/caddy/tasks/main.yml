@@ -1,0 +1,159 @@
+---
+
+- name: Allow containers to read host CA certificates (SELinux)
+  ansible.posix.seboolean:
+    name: container_read_certs
+    state: true
+    persistent: true
+  become: true
+
+- name: Determine lowest published host port
+  ansible.builtin.set_fact:
+    caddy_min_host_port: >-
+      {{ caddy_publish_ports
+         | map('regex_replace', '/.*$', '')
+         | map('regex_replace', '^(?:.*:)?(\d+):\d+$', '\1')
+         | map('int') | min }}
+
+- name: Allow rootless Podman to bind privileged ports
+  ansible.builtin.copy:
+    content: "net.ipv4.ip_unprivileged_port_start = {{ caddy_min_host_port }}\n"
+    dest: /etc/sysctl.d/99-unprivileged-ports.conf
+    mode: '0644'
+  become: true
+  become_user: root
+  when: caddy_min_host_port | int < 1024
+  notify: Apply sysctl settings
+
+- name: Flush handlers before starting roles
+  ansible.builtin.meta: flush_handlers
+
+- name: Ensure Caddy config directory exists
+  ansible.builtin.file:
+    path: "{{ caddy_config_dir }}"
+    state: directory
+    owner: "{{ caddy_service_user }}"
+    group: "{{ caddy_service_group }}"
+    mode: '0750'
+  become: true
+  tags: caddy_configure
+
+- name: Deploy Caddy Configuration
+  ansible.builtin.copy:
+    dest: "{{ caddy_config_dir }}/Caddyfile"
+    owner: "{{ caddy_service_user }}"
+    group: "{{ caddy_service_group }}"
+    mode: '0644'
+    setype: container_file_t
+    content: |
+      {% for caddy_domain in caddy_domains %}
+      {{ caddy_domain }}
+      {% endfor %}
+  become: true
+  notify: Restart caddy
+  tags: caddy_configure
+
+- name: Validate each caddy oauth2-proxy entry
+  ansible.builtin.assert:
+    that:
+      - __caddy_oauth2_proxy.name is defined
+      - __caddy_oauth2_proxy.name is match('^[a-z0-9-]+$')
+      - __caddy_oauth2_proxy.domain is defined and __caddy_oauth2_proxy.domain | length > 0
+      - __caddy_oauth2_proxy.allowed_groups is defined and __caddy_oauth2_proxy.allowed_groups | length > 0
+      - __caddy_oauth2_proxy.client_id is defined and __caddy_oauth2_proxy.client_id | length > 0
+      - __caddy_oauth2_proxy.client_secret is defined and __caddy_oauth2_proxy.client_secret | length > 0
+      - __caddy_oauth2_proxy.cookie_secret is defined and __caddy_oauth2_proxy.cookie_secret | length > 0
+    quiet: true
+    fail_msg: >-
+      Invalid caddy_oauth2_proxies entry '{{ __caddy_oauth2_proxy.name | default('<no name>') }}':
+      require a DNS-safe name (^[a-z0-9-]+$), a domain, a non-empty allowed_groups list,
+      and client_id / client_secret / cookie_secret.
+  loop: "{{ caddy_oauth2_proxies }}"
+  loop_control:
+    loop_var: __caddy_oauth2_proxy
+    label: "{{ __caddy_oauth2_proxy.name | default('?') }}"
+  no_log: "{{ soe_no_log_enabled | default(true) }}"
+
+# Only created when a forward-auth sidecar exists. Without it the Caddy
+# container keeps podman's default networking, exactly as before.
+- name: Deploy the shared Caddy network Quadlet
+  ansible.builtin.include_role:
+    name: redhat.rhel_system_roles.podman
+  vars:
+    podman_run_as_user: "{{ caddy_service_user }}"
+    podman_systemd_unit_scope: user
+    podman_activate_systemd_unit: true
+    podman_quadlet_specs:
+      - name: "{{ caddy_network }}"
+        type: network
+        state: started
+        file_content: |
+          [Network]
+          NetworkName={{ caddy_network }}
+          Label=app=caddy
+  when: caddy_oauth2_proxies | length > 0
+
+- name: Deploy Caddy Quadlet units
+  ansible.builtin.include_role:
+    name: redhat.rhel_system_roles.podman
+  vars:
+    podman_run_as_user: "{{ caddy_service_user }}"
+    podman_systemd_unit_scope: user
+    podman_quadlet_specs:
+      - name: caddy
+        type: volume
+        state: started
+        file_content: |
+          [Volume]
+          VolumeName=caddy
+          Label=app=caddy
+      - name: caddy
+        type: container
+        pull_image: "{{ podman_pull_image | bool | default(false) }}"
+        continue_if_pull_fails: true
+        state: started
+        file_content: |
+          [Unit]
+          Description=Caddy — TLS reverse proxy
+          After=local-fs.target network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Restart=on-failure
+          RestartSec=10
+          TimeoutStartSec=60
+
+          [Container]
+          ContainerName=caddy
+          Image=docker.io/caddy:latest
+
+          Volume=caddy.volume:/data:z
+
+          Volume={{ caddy_config_dir }}/Caddyfile:/etc/caddy/Caddyfile:ro
+
+          {% if caddy_oauth2_proxies | length > 0 %}
+          # Join the shared bridge so `forward_auth oauth2-proxy-<name>:<port>`
+          # resolves by container name. Those sidecars publish no host port.
+          Network={{ caddy_network }}.network
+          {% endif %}
+
+          {% for port in caddy_publish_ports %}
+          PublishPort={{ port }}
+          {% endfor %}
+
+          # Mount host consolidated trust bundle for IdM-signed certs
+          Volume=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem:/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem:ro
+
+          # Ensure TLS stack can find the CA bundle
+          Environment=SSL_CERT_FILE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+          Environment=REQUESTS_CA_BUNDLE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+
+          [Install]
+          WantedBy=default.target
+
+- name: Configure one oauth2-proxy per protected vhost
+  ansible.builtin.include_tasks: oauth2_proxy.yml
+  loop: "{{ caddy_oauth2_proxies }}"
+  loop_control:
+    loop_var: __caddy_oauth2_proxy
+    label: "{{ __caddy_oauth2_proxy.name }}"

@@ -1,0 +1,100 @@
+---
+# https://console.redhat.com/ansible/automation-hub/collections/published/redhat/rhel_system_roles/documentation/role/podman
+#
+# One isolated mcpo container per Google account. Shared once here (image,
+# GCP OAuth client secret); per-account resources are looped in account.yml.
+
+- name: Validate each ai_gws user entry
+  ansible.builtin.assert:
+    that:
+      - __ai_gws_user.username is defined
+      - __ai_gws_user.username is match('^[a-z0-9-]+$')
+      - __ai_gws_user.google_account is defined
+      - __ai_gws_user.google_account | length > 0
+      - __ai_gws_user.api_key is defined
+      - __ai_gws_user.api_key | length > 0
+    quiet: true
+    fail_msg: >-
+      Invalid ai_gws_users entry '{{ __ai_gws_user.username | default('<no username>') }}':
+      require a DNS-safe username (^[a-z0-9-]+$), a google_account, and a non-empty api_key.
+  loop: "{{ ai_gws_users }}"
+  loop_control:
+    loop_var: __ai_gws_user
+    label: "{{ __ai_gws_user.username | default('?') }}"
+  no_log: true
+
+- name: Allow containers to read host CA certificates (SELinux)
+  ansible.posix.seboolean:
+    name: container_read_certs
+    state: true
+    persistent: true
+  become: true
+
+- name: Enable lingering so the rootless AI Google Workspace units start at boot
+  ansible.builtin.command:
+    cmd: "loginctl enable-linger {{ ai_gws_service_user }}"
+    creates: "/var/lib/systemd/linger/{{ ai_gws_service_user }}"
+  become: true
+
+- name: Ensure the image build context and per-user config directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ ai_gws_service_user }}"
+    group: "{{ ai_gws_service_group }}"
+    mode: '0755'
+  loop:
+    - "{{ ai_gws_build_dir }}"
+    - "{{ ai_gws_config_dir }}"
+  become: true
+  tags: ai_gws_build
+
+- name: Stage the ai-gws container build context
+  ansible.builtin.template:
+    src: Containerfile.j2
+    dest: "{{ ai_gws_build_dir }}/Containerfile"
+    owner: "{{ ai_gws_service_user }}"
+    group: "{{ ai_gws_service_group }}"
+    mode: '0644'
+  become: true
+  notify: Restart ai_gws instances
+  tags: ai_gws_build
+
+- name: Build the ai-gws image once (shared by every per-user container)
+  redhat.rhel_system_roles.podman_image:
+    name: "{{ ai_gws_image }}"
+    path: "{{ ai_gws_build_dir }}"
+    build:
+      format: oci
+      extra_args: >-
+        --build-arg MCPO_VERSION={{ ai_gws_mcpo_version }}
+        --build-arg GWS_MCP_VERSION={{ ai_gws_server_version }}
+        --build-arg GWS_CLI_VERSION={{ ai_gws_gws_cli_version }}
+    force: false
+  become: true
+  become_user: "{{ ai_gws_service_user }}"
+  notify: Restart ai_gws instances
+  tags: ai_gws_build
+
+- name: Store the shared GCP OAuth client secrets
+  ansible.builtin.include_role:
+    name: redhat.rhel_system_roles.podman
+  vars:
+    podman_run_as_user: "{{ ai_gws_service_user }}"
+    podman_systemd_unit_scope: user
+    podman_secrets:
+      - name: ai-gws-google-client-id
+        state: present
+        data: "{{ ai_gws_google_client_id }}"
+
+      - name: ai-gws-google-client-secret
+        state: present
+        data: "{{ ai_gws_google_client_secret }}"
+  no_log: true
+
+- name: Configure one isolated tool server per Google account
+  ansible.builtin.include_tasks: account.yml
+  loop: "{{ ai_gws_users }}"
+  loop_control:
+    loop_var: __ai_gws_user
+    label: "{{ __ai_gws_user.username }}"

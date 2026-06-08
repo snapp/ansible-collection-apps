@@ -1,0 +1,63 @@
+{{ ansible_managed | comment }}
+{% set user = __ai_gws_user %}
+[Unit]
+Description=Google Workspace MCP tool server ({{ user.google_account }})
+After=local-fs.target network-online.target
+Wants=network-online.target
+
+[Service]
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=120
+
+[Container]
+ContainerName=ai-gws-{{ user.username }}
+Image={{ ai_gws_image }}
+
+# Single-tenant marker: this container holds exactly ONE Google account's tokens.
+Label=app=ai-stack
+Label=owui-user={{ user.username }}
+
+# mcpo has no environment variable for its API key, so bridge the per-user Podman
+# secret (MCPO_API_KEY) to the --api-key flag via a tiny shell exec. This keeps
+# the key out of the unit file (same shape as the ai-model-cache unit).
+Entrypoint=/bin/sh
+Exec=-c 'exec mcpo --host 0.0.0.0 --port {{ ai_gws_port }} --api-key "$MCPO_API_KEY" --config /app/config/config.json'
+
+# Per-user mcpo Bearer key — distinct per container.
+Secret=ai-gws-{{ user.username }}-api-key,type=env,target=MCPO_API_KEY
+
+# Shared GCP OAuth *client* identity. Inherited by the google-workspace-mcp child
+# via mcpo's {**os.environ, **self.env} merge — never written to config.json.
+Secret=ai-gws-google-client-id,type=env,target=GOOGLE_CLIENT_ID
+Secret=ai-gws-google-client-secret,type=env,target=GOOGLE_CLIENT_SECRET
+
+# Per-user mcpo config (non-secret), mounted read-only.
+Volume={{ ai_gws_config_dir }}/{{ user.username }}/config.json:/app/config/config.json:ro
+
+# Per-user persistent state — this account's registry (~/.config) and OAuth
+# tokens (~/.local/share). No other account's credentials are ever mounted here.
+Volume=ai-gws-{{ user.username }}-config.volume:/home/mcpo/.config:Z
+Volume=ai-gws-{{ user.username }}-data.volume:/home/mcpo/.local/share:Z
+
+# Join the shared AI bridge so Open WebUI resolves this by name. No host port.
+Network={{ ai_gws_network }}.network
+
+# Mount host consolidated trust bundle for IdM-signed certs
+Volume=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem:/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem:ro
+
+# Ensure the Python, Node, curl and gws TLS stacks find the CA bundle
+Environment=SSL_CERT_FILE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+Environment=REQUESTS_CA_BUNDLE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+Environment=NODE_EXTRA_CA_CERTS=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+
+# mcpo serves /docs once its OpenAPI app is mounted; probe it with this
+# container's own key so a failing key also trips the healthcheck.
+HealthCmd=curl -fsS -H "Authorization: Bearer $MCPO_API_KEY" http://localhost:{{ ai_gws_port }}/docs || exit 1
+HealthInterval=30s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=20s
+
+[Install]
+WantedBy=default.target

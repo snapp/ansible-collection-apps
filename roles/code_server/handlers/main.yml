@@ -1,0 +1,21 @@
+---
+
+# The podman system role starts/restarts units whose content changed, but the
+# staged Containerfile, the staged CA anchor, and the bind-mounted host trust
+# bundle all live outside the unit content. A rebuild or a re-stage must
+# therefore restart the running containers here. Restarting every instance is
+# intentional: the build context is shared, so a rebuild affects them all.
+#
+# become_user varies per item — each developer's unit lives in their own user
+# systemd instance, unlike ai_gws where one service user owns every container.
+- name: Restart code_server instances
+  ansible.builtin.systemd:
+    name: "code-server-{{ __code_server_user.username }}.service"
+    state: restarted
+    scope: user
+  become: true
+  become_user: "{{ __code_server_user.username }}"
+  loop: "{{ code_server_users }}"
+  loop_control:
+    loop_var: __code_server_user
+    label: "{{ __code_server_user.username }}"

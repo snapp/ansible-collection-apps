@@ -1,0 +1,40 @@
+---
+
+# Service account that owns the rootless Podman user units. Must already exist
+# and have subuid/subgid ranges allocated; the role enables linger on it so the
+# controller survives reboots.
+unifi_service_user: unifi
+
+unifi_service_group: unifi
+
+# Version pin. 8.6.9 is the last UniFi Network Application release that can adopt
+# and configure the legacy USG. Do NOT bump past the 8.6.x line while a USG is in
+# service — 9.x/10.x drop USG support entirely.
+# NOTE|2026-06-24| Hand-built image was previously on 10.1.85; pinned back to
+# 8.6.x to keep the USG manageable. Raise this only after replacing the USG with
+# a UXG/UDM.
+unifi_version: 8.6.9
+
+# MongoDB shell version installed into the image. The embedded mongod ships with
+# UniFi itself; this only governs the mongosh client used for maintenance.
+unifi_mongo_version: '7.0'
+
+# Locally built image tag. The version is baked into the tag so a version bump
+# triggers a rebuild rather than reusing a stale image.
+unifi_image: "localhost/ubiquiti-unifi:{{ unifi_version }}"
+
+# Host directory used as the `podman build` context (Containerfile + entrypoint).
+unifi_build_dir: /opt/unifi/build
+
+# Published ports. These are bound on all interfaces so UniFi devices on the LAN
+# can reach the controller for adoption and inform traffic.
+# NOTE|2026-06-24| The inform port is mapped host 8180 -> container 8080 to match
+# the previous manual `podman run`. Devices must be told to inform on :8180
+# (set-inform / controller "Override inform host"); a mismatch is the usual cause
+# of adoption failures. Change to '8080:8080' if you want the standard port.
+unifi_publish_ports:
+  - '8443:8443'        # Web UI + device inform (HTTPS)
+  - '8180:8080'        # Device inform (HTTP) — host 8180 -> container 8080
+  - '8843:8843'        # Guest hotspot portal (HTTPS)
+  - '3478:3478/udp'    # STUN (used by devices to reach the controller)
+  - '10001:10001/udp'  # Device discovery (L3 adoption)
